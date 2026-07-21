@@ -1,0 +1,476 @@
+  1700→
+  1701→1. **Per-NPC player override** (`state.npcOverrides.get(npcId)`)
+  1702→   - Honored UNCONDITIONALLY — the resolver does NOT check whether the chosen variant is actually available. The rationale: the override represents the player's explicit preference; `resolveNpcConfigForPlayer` on the registry is responsible for gracefully falling back to whatever's actually loadable (e.g. a player who forced `'osrs'` on an NPC with no OSRS import will see the legacy model via the fallback, but the resolver still reports `'osrs'` so the UI can flag the mismatch).
+  1703→
+  1704→2. **Per-region player override** (`state.regionOverrides.get(regionId)`)
+  1705→   - STUB: today the registry always passes `regionId = -1` (which never matches any entry), so this step is effectively a no-op. The spawn-side wiring that would populate "current player region" is deferred to a later task. The `resolveNpcVariantForRegion(npcId, playerId, regionId)` method exists on the registry so the spawn-site migration is a one-line change once the region lookup is wired.
+  1706→
+  1707→3. **Player era preset** (`state.eraPreset`)
+  1708→   - Respects availability (unlike steps 1 and 2). The `resolveEraPreset` helper translates:
+  1709→     - `'05era'`   → `'legacy377'` (or `'osrs'` if the NPC has no legacy twin — i.e. brand-new OSRS content).
+  1710→     - `'07era'`   → `'osrs'` if available, else `'legacy377'`. (Today equivalent to `'allOSRS'` because we don't track per-NPC "year added" — see the `EraPreset` docstring in `PlayerVariantState.ts`.)
+  1711→     - `'allOSRS'` → `'osrs'` if available, else `'legacy377'`.
+  1712→     - `'mixed'`   → same as `'05era'` (the override map is checked first; this is the fallback).
+  1713→
+  1714→4. **Server default** (`'05era'` → `'legacy377'`)
+  1715→   - Defensive fallback — should never be reached because `PlayerVariantState` always has a valid `eraPreset`.
+  1716→
+  1717→**Backwards-compat guarantee:** a freshly-created state (default `eraPreset = '05era'`, empty override maps) selects `'legacy377'` for every NPC that has a legacy twin — i.e. the existing `NpcType.get(id)` path is preserved unchanged for any NPC that hasn't been imported. Only NPCs that were imported from OSRS via Task 8 (and registered in `content/deps/variants.json`) are eligible for the `'osrs'` variant — and only for players who explicitly chose an OSRS-era preset or set a per-NPC `'osrs'` override.
+  1718→
+  1719→### Prisma schema addition
+  1720→
+  1721→```prisma
+  1722→model PlayerModelPreference {
+  1723→    playerId        Int      @id
+  1724→    eraPreset       String   @default("05era")
+  1725→    npcOverrides    String   @default("{}")  // JSON map: { "9001": "osrs", "9002": "legacy377" }
+  1726→    regionOverrides String   @default("{}")  // JSON map
+  1727→    updatedAt       DateTime @updatedAt
+  1728→    account         account  @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  1729→}
+  1730→```
+  1731→
+  1732→Added to BOTH `singleworld/schema.prisma` (sqlite) and `multiworld/schema.prisma` (mysql). The `account` model was extended with a back-relation field: `PlayerModelPreference PlayerModelPreference?`.
+  1733→
+  1734→**Migration result:**
+  1735→- **Singleworld (sqlite):** migration `20260720151954_add_player_model_preference` SUCCEEDED. Applied to `db.sqlite`. Verified end-to-end with a DB round-trip test (insert with specific playerId → reload → upsert → delete → reload returns defaults).
+  1736→- **Multiworld (mysql):** migration SKIPPED — no MySQL DB available in the sandbox (`DATABASE_URL` env var not set). Schema validated via `DATABASE_URL="mysql://fake:fake@localhost:3306/fake" bunx prisma validate --schema prisma/multiworld/schema.prisma` → "The schema is valid". User can run the migration themselves once MySQL is configured:
+  1737→  ```
+  1738→  DATABASE_URL="mysql://user:pass@host:port/db" bunx prisma migrate dev \
+  1739→      --schema prisma/multiworld/schema.prisma \
+  1740→      --name add_player_model_preference
+  1741→  ```
+  1742→
+  1743→### variants.json schema (the on-disk index)
+  1744→```json
+  1745→{
+  1746→  "version": 1,
+  1747→  "variants": [
+  1748→    {
+  1749→      "legacyNpcId":     number,         // -1 if brand-new OSRS NPC (no legacy twin)
+  1750→      "osrsNpcId":       number,         // the new 377 pack-file ID assigned by Task 8
+  1751→      "osrsDebugname":   string,         // sanitized debugname (with `osrs_` prefix)
+  1752→      "legacyDebugname": string | null,  // null if legacyNpcId === -1
+  1753→      "depMapPath":      string,         // relative path: content/deps/<name>.deps.json
+  1754→      "importedAt":      string          // ISO timestamp
+  1755→    }
+  1756→  ]
+  1757→}
+  1758→```
+  1759→
+  1760→For NPCs that have NO legacy equivalent (e.g. Tormented Demon), `legacyNpcId === -1` and `legacyDebugname === null`. `getAvailableVariants(osrsNpcId)` returns `['osrs']` only — the player's era preset and any `'legacy377'` override are honored unconditionally per the precedence rule, but `resolveNpcConfigForPlayer` falls back to the imported NpcType since there's no legacy to load.
+  1761→
+  1762→For NPCs with a legacy twin (e.g. Kalphite Queen, which exists in both 377 and OSRS), `legacyNpcId` is the existing 377 ID. `getAvailableVariants(legacyNpcId)` returns `['legacy377', 'osrs']` — the player's choice applies.
+  1763→
+  1764→### Integration pattern with existing NpcType
+  1765→
+  1766→The variant registry is NOT a wrapper around `NpcType`. It's a side-channel: when an NPC is being spawned for a specific player, the spawn code calls `VariantRegistry.resolveNpcVariant(npcId, playerId)` to decide which config ID to use. The two paths are:
+  1767→
+  1768→- `'legacy377'` → use the existing `NpcType.get(npcId)` path UNCHANGED. This is the default for every NPC that hasn't been imported.
+  1769→- `'osrs'`       → use `NpcType.get(osrsImportedNpcId)` — the imported NPC's new 377 pack-file ID. The imported NPC config has its own `models[]` array pointing at the OSRS-imported models' new 377 IDs — so no per-model swap is needed at the spawn site.
+  1770→
+  1771→A single helper does the lookup:
+  1772→```ts
+  1773→VariantRegistry.getInstance().resolveNpcConfigForPlayer(npcId, playerId): NpcType
+  1774→```
+  1775→
+  1776→Returns the legacy NpcType (`NpcType.get(npcId)`) or the OSRS-imported NpcType (`NpcType.get(osrsImportedNpcId)`). Future engine work can migrate NPC spawn sites one at a time to call this helper instead of `NpcType.get(npcId)` directly. Until a spawn site is migrated, the existing `NpcType.get(npcId)` path continues to work unchanged — the variant system is invisible to it. The registry does NOT modify `NpcType.configs[]` or any other existing static registry; it only consults them (for the `legacyModelOwner` reverse index used by `resolveModelVariant`).
+  1777→
+  1778→The spawn-site migration is intentionally deferred — touching every `NpcType.get(...)` call in the codebase (7 files: `World.ts`, `entity/Npc.ts`, `entity/Player.ts`, `GameMap.ts`, `script/ScriptIterators.ts`, `script/handlers/NpcOps.ts`, `script/handlers/PlayerOps.ts`) is too invasive for one task. The helper is in place; the migration can happen one spawn site at a time.
+  1779→
+  1780→### Per-player state caching
+  1781→
+  1782→`resolveNpcVariant(npcId, playerId)` is SYNC (the spawn path is hot). The per-player `PlayerVariantState` is loaded asynchronously by `VariantPersistence.loadPlayerVariantState(playerId)` at login time and stashed in the registry's `playerStateCache` Map. The login handler is expected to call:
+  1783→```ts
+  1784→const state = await loadPlayerVariantState(playerId);
+  1785→VariantRegistry.getInstance().setPlayerState(playerId, state);
+  1786→```
+  1787→On logout: `VariantRegistry.getInstance().clearPlayerState(playerId)`.
+  1788→
+  1789→If `resolveNpcVariant` is called for a playerId that's not in the cache (e.g. before the login handler has warmed it), the registry returns the server default (`'legacy377'` for everything with a legacy twin, `'osrs'` for brand-new OSRS NPCs). A warning is logged so the developer knows the cache wasn't warmed — but the engine doesn't crash.
+  1790→
+  1791→### Verification
+  1792→
+  1793→- **`bun run lint`:** 4 baseline errors (all in `src/io/Packet.ts`) + 15 baseline warnings (all pre-existing). ZERO errors and ZERO warnings in the 7 new files. No regression. (Initial run flagged 10 lint errors in the new files: 6 backtick-without-interpolation strings in `SelfTestVariant.ts`, 1 in `VariantRegistry.ts`, an unused `VariantRegistry` import in `VariantResolver.ts`, an unused `showHelp` function shadowed by a destructured boolean in `UpdateVariantsIndex.ts`, and an unused `contentDir` arg in `UpdateVariantsIndex.ts` — all fixed.)
+  1794→
+  1795→- **`bunx tsc --noEmit -p tsconfig.json`:** 9 pre-existing errors (in `OsrsModel.ts`, `DependencyTracer.ts`, `SelfTest.ts` — all from Tasks 5-a/6). ZERO TypeScript errors in the new files.
+  1796→
+  1797→- **`bun tools/osrs/SelfTestVariant.ts`:** ALL PASS (22 assertions across 5 spec-required tests + 4 bonus availability/precedence tests + 6 bonus JSON round-trip tests):
+  1798→  - Test 1: stub VariantRegistry with one imported NPC (legacyNpcId=-1, osrsNpcId=9001, debugname=osrs_tormented_demon). `getAvailableVariants(9001) === ['osrs']`, `getAvailableVariants(9999) === ['legacy377']`, `getVariantMetadata(9001)` returns osrs_tormented_demon with legacyNpcId=-1.
+  1799→  - Test 2: PlayerVariantState with eraPreset='allOSRS'.
+  1800→  - Test 3: `resolveNpcVariant(9001, 1)` → 'osrs'. ✓
+  1801→  - Test 4: `resolveNpcVariant(9999, 1)` → 'legacy377'. ✓
+  1802→  - Test 5: Set per-NPC override on 9001 to 'legacy377' → 'legacy377'. ✓
+  1803→  - Bonus: default state (05era) for brand-new NPC 9001 → 'osrs' (forced, only available variant).
+  1804→  - Bonus: 'mixed' era for NPC 9999 → 'legacy377'.
+  1805→  - Bonus: override='osrs' on NPC 9999 (no OSRS variant) → 'osrs' (honored unconditionally).
+  1806→  - Bonus: JSON round-trip preserves eraPreset and both npcOverrides entries.
+  1807→  - Bonus: malformed JSON input (eraPreset='invalid-preset', npcOverrides='not-json') falls back to default era '05era' and empty override map.
+  1808→
+  1809→- **End-to-end DB round-trip test** (manual, against the migrated sqlite db.sqlite):
+  1810→  - `loadPlayerVariantState(88888)` with no row → returns default state (eraPreset='05era').
+  1811→  - `savePlayerVariantState(state)` with eraPreset='allOSRS' + 2 npcOverrides → row inserted.
+  1812→  - `loadPlayerVariantState(88888)` → values match (eraPreset='allOSRS', 2 overrides, npcOverrides.get(9001)==='osrs').
+  1813→  - `savePlayerVariantState(state)` with eraPreset='mixed' + 1 override removed → row updated (upsert).
+  1814→  - `loadPlayerVariantState(88888)` → values match (eraPreset='mixed', 1 override).
+  1815→  - `deletePlayerVariantState(88888)` → row deleted; subsequent load returns defaults.
+  1816→
+  1817→- **End-to-end variants.json round-trip test** (manual):
+  1818→  - `bun tools/osrs/UpdateVariantsIndex.ts` with one fake `content/deps/test_td.deps.json` (Tormented Demon stub, root.id=9001, npcNode.transformedFrom=5001, npcNode.name='osrs_tormented_demon') → writes `content/deps/variants.json` with one entry: `{legacyNpcId: -1, osrsNpcId: 5001, osrsDebugname: 'osrs_tormented_demon', legacyDebugname: null, depMapPath: '../content/deps/test_td.deps.json', importedAt: <iso>}`. (NpcType wasn't loaded in the sandbox, so the legacyNpcId lookup missed → -1. In a real engine with NpcType loaded, an OSRS NPC whose debugname matches a legacy debugname (modulo `osrs_` prefix) would get the correct legacyNpcId.)
+  1819→  - `VariantRegistry.load('/path/to/variants.json')` → in-memory state populated; `getAvailableVariants(5001) === ['osrs']`, `getVariantMetadata(5001)` returns the entry, `resolveNpcVariant(5001, 1)` returns 'osrs' (server default for brand-new NPC).
+  1820→  - `VariantRegistry.registerVariant(1158, 5002, kqDepsMap, '../content/deps/test_kq.deps.json')` → in-memory count goes from 1 to 2; the new entry (legacyNpcId=1158, osrsNpcId=5002) is written to variants.json on disk; `getAvailableVariants(1158)` returns `['legacy377', 'osrs']` (dual-variant NPC).
+  1821→  - Dual-variant resolution: 05era + legacyNpcId=1158 → 'legacy377'; allOSRS + legacyNpcId=1158 → 'osrs'; override='legacy377' on 1158 → 'legacy377'; override cleared → back to allOSRS='osrs'.
+  1822→
+  1823→### What's stubbed for the UI (later task)
+  1824→
+  1825→1. **Start-screen configuration UI** — not built. The `PlayerVariantState` API (`setEra`, `setNpcOverride`, `clearNpcOverride`, `clearAll`) is the contract the UI will call. The `VariantRegistry.getAvailableVariants(npcId)` and `getVariantMetadata(npcId)` methods provide the data the UI needs to render the picker (which NPCs have OSRS variants, what their debugnames are, when they were imported).
+  1826→
+  1827→2. **Per-region/town override** — interface only, no implementation. The `PlayerVariantState.regionOverrides` map and `setRegionOverride`/`clearRegionOverride` methods exist; the resolver consults the map (step 2 of the precedence). But the spawn-side wiring that would pass the player's current region ID is not in place — `VariantRegistry.resolveNpcVariant` always passes `regionId = -1` today. The `resolveNpcVariantForRegion(npcId, playerId, regionId)` method exists for the future spawn-site migration.
+  1828→
+  1829→3. **Spawn-site migration** — the `resolveNpcConfigForPlayer(npcId, playerId)` helper is in place but no spawn sites have been migrated to call it. The 7 files that call `NpcType.get(...)` directly (`World.ts`, `entity/Npc.ts`, `entity/Player.ts`, `GameMap.ts`, `script/ScriptIterators.ts`, `script/handlers/NpcOps.ts`, `script/handlers/PlayerOps.ts`) continue to use the legacy path. This is intentional — the system is opt-in, and migrating one spawn site at a time is the safer path.
+  1830→
+  1831→4. **`resolveModelVariant` per-model swap** — uses a parallel-array heuristic (legacy NPC has N models, OSRS NPC has N models → pair by index). If the counts differ, NO per-model swap is done (the legacy model ID is returned unchanged). The caller should use `resolveNpcConfigForPlayer` instead, which swaps the entire NPC config (and thus the entire `models[]` array). This limitation is documented in the `VariantRegistry.resolveModelVariant` JSDoc.
+  1832→
+  1833→5. **`'07era'` preset semantic** — today equivalent to `'allOSRS'` because we don't track per-NPC "year added" metadata. When more OSRS imports land, the registry can distinguish "added in 2007+" NPCs via a future `addedAt` field on the variant metadata, and `'07era'` can be tightened to use OSRS only for those.
+  1834→
+  1835→### Next-action hooks for downstream tasks
+  1836→
+  1837→- **Task 10 (pilot: Tormented Demon):** after running Task 8's `Import.ts`, call `VariantRegistry.getInstance().registerVariant(-1, <newNpcId>, depMapUpdated, '<depMapPath>')` to register the variant in `content/deps/variants.json`. Then at engine startup, `VariantRegistry.load()` will pick it up. A test player with `eraPreset='allOSRS'` will see the OSRS Tormented Demon; a test player with `eraPreset='05era'` will also see it (because it's the only available variant — the resolver forces 'osrs' when no legacy twin exists).
+  1838→
+  1839→- **Task 11 (Kalphite Queen):** the variant pair will have `legacyNpcId = <existing 377 KQ ID>` and `osrsNpcId = <new 377 ID assigned by Task 8>`. Test players on `'05era'` see the legacy KQ; test players on `'allOSRS'` see the OSRS KQ. The `multinpc[]` form-swap is handled automatically because each form is a separate `npc:` node in the deps map (Task 6 already walked multinpc transitively, and Task 8 emits each form's config separately).
+  1840→
+  1841→- **Future UI task:** build the start-screen configuration UI. The contract is:
+  1842→  - `PlayerVariantState.setEra(preset)` — basic mode picker.
+  1843→  - `PlayerVariantState.setNpcOverride(npcId, variant)` / `clearNpcOverride(npcId)` — advanced mode per-NPC picker.
+  1844→  - `PlayerVariantState.setRegionOverride(regionId, variant)` / `clearRegionOverride(regionId)` — advanced mode per-region picker (stub today).
+  1845→  - `PlayerVariantState.clearAll()` — reset to defaults.
+  1846→  - `VariantRegistry.getAvailableVariants(npcId)` — restrict the picker to actually-selectable variants.
+  1847→  - `VariantRegistry.getVariantMetadata(npcId)` — show debugnames + import date in the picker.
+  1848→  - `VariantRegistry.getAllVariants()` — render the full list of imported NPCs.
+  1849→  - `savePlayerVariantState(state)` — persist on every change (or batch on UI close).
+  1850→
+  1851→- **Future spawn-site migration:** replace `NpcType.get(npcId)` calls in spawn paths with `VariantRegistry.getInstance().resolveNpcConfigForPlayer(npcId, playerId)`. The player object is already in scope at every spawn site (it's the player the NPC is being spawned for). The 7 files to migrate are listed in the "Integration pattern" section above.
+  1852→
+  1853→- **Future cleanup:** add `src/db/types.ts` to eslint ignores (it's a generated file; the double-quote import is a `prisma-kysely` output style). Currently linted, which means every `prisma generate` run introduces a one-char lint error. The error was manually fixed in this task, but the next `prisma generate` will reintroduce it.
+  1854→
+  1855→
+  1856→---
+  1857→
+  1858→## Task 10 — End-to-end pilot: Tormented Demon
+  1859→**Agent:** PilotRunner
+  1860→**Status:** done
+  1861→
+  1862→### Files created (all under `engine/tools/osrs/`)
+  1863→- `fixtures/TormentedDemonFixture.ts` (~700 lines incl. extensive JSDoc) — Part A:
+  1864→  synthesizes a minimal OSRS-shaped test fixture (1 model, 1 anim-base, 2
+  1865→  anim frames, 2 seq configs, 1 NPC config, 1 fake combat script). Exposes
+  1866→  a `TormentedDemonStubReader` class implementing the same `CacheReader`
+  1867→  interface as Task 7's `OsrsCacheAssetReader`, but using the REAL OSRS
+  1868→  decoders (`OsrsModel.decode`, `OsrsAnimFrame.decode`, `OsrsNpcType.decode`,
+  1869→  `OsrsSeqType.decode`) on synthesized bytes that match the OSRS on-disk
+  1870→  format byte-for-byte.
+  1871→- `PilotTormentedDemon.ts` (~700 lines incl. extensive JSDoc) — Part B/C:
+  1872→  the end-to-end pipeline runner. Wires together the fixture → tracer →
+  1873→  writer → variant registry → index regenerator, runs 75 assertions on
+  1874→  every stage's output, prints a clean "PILOT PASS — ..." summary line.
+  1875→  Documents the real-cache runner path (Part C) in the script header.
+  1876→
+  1877→### Files modified
+  1878→- `UpdateVariantsIndex.ts` — refactored to export a `regenerateIndex
+  1879→  (contentDir): number` function (used by the pilot directly, without
+  1880→  spawning a subprocess). The existing `main()` calls it; the auto-run
+  1881→  entrypoint is now guarded by `if (import.meta.main)` so importing the
+  1882→  module for its `regenerateIndex` export doesn't trigger `process.exit`.
+  1883→
+  1884→### Fixture approach chosen: StubCacheReader (the spec-sanctioned fallback)
+  1885→
+  1886→The task spec offered a fallback: "If writing a real JS5 store from
+  1887→scratch is too involved, you have a fallback: write a `StubCacheReader`
+  1888→that implements the `CacheReader` interface directly (bypassing
+  1889→`OsrsCacheReader`) and returns the synthesized `OsrsModel` /
+  1890→`OsrsAnimFrame` / etc objects in-memory. This is acceptable for the
+  1891→pilot — the real OsrsCacheReader (Task 7) is already tested separately."
+  1892→
+  1893→We took the fallback. Rationale:
+  1894→1. The real `OsrsCacheReader` (Task 7) already has 29 self-test assertions
+  1895→   covering sector walking, container decompression, master index parsing,
+  1896→   and multi-child archive splitting. Re-implementing the JS5 sector-walking
+  1897→   + container compression + master index hashing just to feed bytes back
+  1898→   into the same decoders adds no coverage to the OSRS bytes → asset path;
+  1899→   it would only test our JS5 packer, which is a different concern.
+  1900→2. The pilot's goal is to prove the END-TO-END pipeline (decode → trace →
+  1901→   transform → write → register) works on realistic OSRS bytes. The
+  1902→   StubCacheReader uses the REAL OSRS decoders on synthesized bytes that
+  1903→   match the OSRS on-disk format byte-for-byte — every code path the
+  1904→   pipeline would hit on a real OSRS cache is exercised here.
+  1905→3. The real-cache path (Part C) is already shipped as Task 8's `Import.ts`
+  1906→   CLI — when the user drops an OSRS cache into `engine/data/osrs-cache/`,
+  1907→   the same `OsrsCacheAssetReader` that Task 7 built will produce identical
+  1908→   `OsrsModel`/`OsrsAnimFrame`/etc instances from the real bytes. The
+  1909→   pilot just stubs the byte-source layer.
+  1910→
+  1911→### Synthesized fixture contents (all byte-by-byte via `Packet`'s p1/p2/pjstr)
+  1912→
+  1913→| Asset | OSRS ID | Bytes | Notes |
+  1914→|-------|---------|-------|-------|
+  1915→| OSRS model (body) | 46001 | 39 | 4 vertices, 2 triangles, version=1, all optional sections omitted |
+  1916→| OSRS model (head) | 46002 | 39 | Same blob as body (the writer treats them as distinct files) |
+  1917→| OSRS AnimBase | 47001 | 16 | 5 bones: OP_BASE/TRANSLATE/ROTATE/SCALE/ALPHA, 1 label each |
+  1918→| OSRS anim frame (stand) | 2005 | 14 | frameLength=5, group0 X/Y/Z=(10,20,30), group1 X=5, delay=2, baseId=47001 |
+  1919→| OSRS anim frame (attack) | 2006 | 14 | frameLength=5, group0 X/Y/Z=(0,0,0), group1 X=0, delay=2, baseId=47001 |
+  1920→| OSRS seq config (td_stand) | 9501 | 13 | opcode 1 (1 frame→2005, delay 2) + opcode 250 (debugname="td_stand") + end |
+  1921→| OSRS seq config (td_attack) | 9502 | 14 | Same shape, frame→2006, debugname="td_attack" |
+  1922→| OSRS NPC config (Tormented demon) | 9501 | ~80 | opcodes 1/2/13/14/60/74-79/249/250/0; params 1234+1235 → seq 9502 |
+  1923→| Fake combat script | tormented_demon.rs2 | ~600 chars | `[ai_aplayer2,Tormented demon]` dispatch + `inv_has(worn, fire_shield)` + `npc_anim(td_attack, 0)` + `sound_synth(td_fireball, 0, 30)` call sites |
+  1924→
+  1925→### End-to-end pipeline runner (7 stages)
+  1926→
+  1927→1. **FIXTURE** — `generateTormentedDemonFixture()` writes temp dir with the
+  1928→   fake combat script; `TormentedDemonStubReader` synthesizes OSRS bytes
+  1929→   in-memory.
+  1930→2. **TRACE** — `DependencyTracer.trace(9501)` walks the OSRS NPC's transitive
+  1931→   deps and produces a `DepsMap`. The script scanner discovers the
+  1932→   `fire_shield` obj ref via `inv_has(worn, fire_shield)` and records it
+  1933→   as a MISSING dep — proving the tracer walks the script → obj edge
+  1934→   (the user's goal: "proving the tracer FOUND the missing dep is the goal").
+  1935→3. **DEPS WRITE** — DepsMap written to `<contentDir>/deps/osrs_tormented_demon.deps.json`.
+  1936→4. **IMPORT** — `ContentFolderWriter.importNpc(9501, depsMap)` walks the deps
+  1937→   map, fetches each OSRS asset via the stub reader, transforms it to 377
+  1938→   bytes via `OsrsModel.toLegacy377()` / `OsrsAnimFrame.toLegacy377()` /
+  1939→   `OsrsNpcType.toLegacy377NpcConfig()`, writes to content folder + pack
+  1940→   files.
+  1941→5. **REGISTER** — `VariantRegistry.registerVariant(-1, <newNpcId>,
+  1942→   depsMap, depMapPath)` adds an entry to `variants.json` with
+  1943→   `legacyNpcId: -1` (brand-new OSRS NPC, no legacy twin).
+  1944→6. **INDEX** — `regenerateIndex(contentDir)` regenerates `variants.json`
+  1945→   from all `*.deps.json` files in the content dir.
+  1946→7. **ASSERT** — 75 assertions on every stage's output, plus a clean
+  1947→   "PILOT PASS — ..." summary line.
+  1948→
+  1949→### Pilot run output (PILOT PASS line + summary)
+  1950→
+  1951→```
+  1952→=== Stage 7: Final summary ===
+  1953→  Total assertions: 75 passed, 0 failed
+  1954→  Fixture dir: /tmp/osrs-td-fixture-F7Zomq
+  1955→  Content dir: /tmp/osrs-pilot-content-jaTJLm
+  1956→  Deps file: /tmp/osrs-pilot-content-jaTJLm/deps/osrs_tormented_demon.deps.json
+  1957→  Variants index: /tmp/osrs-pilot-content-jaTJLm/deps/variants.json
+  1958→PILOT PASS — Tormented Demon imported: 11 nodes traced, 8 files written, 10 pack entries added, 1 variant registered.
+  1959→```
+  1960→
+  1961→### Deps map shape (paste of actual `nodes` keys from produced deps.json)
+  1962→
+  1963→```
+  1964→anim-base:47001
+  1965→anim:2005
+  1966→anim:2006
+  1967→model:46001
+  1968→model:46002
+  1969→npc:9501
+  1970→param:1234
+  1971→param:1235
+  1972→script:tormented_demon
+  1973→seq:9501
+  1974→seq:9502
+  1975→```
+  1976→
+  1977→11 nodes total. 0 cycles. 3 missing refs:
+  1978→- `seq:td_attack` (script scanner found name via `npc_anim(td_attack, 0)`,
+  1979→  can't resolve name → cache ID without pack files — documented Task 6
+  1980→  behavior).
+  1981→- `sound:td_fireball` (script scanner, sound not in pack).
+  1982→- `obj:fire_shield` (script scanner, obj not in pack — **the EXPECTED
+  1983→  missing dep the user wanted to prove the tracer finds**).
+  1984→
+  1985→### File paths written by the pilot (in the temp content dir)
+  1986→
+  1987→Binary assets:
+  1988→- `models/osrs_imports/osrs_model_46001.ob2` (34 bytes — 16 body + 18 377 trailer)
+  1989→- `models/osrs_imports/osrs_model_46002.ob2` (34 bytes)
+  1990→- `models/osrs_imports/osrs_anim_2005.anim` (39 bytes — 1-frame 377 blob)
+  1991→- `models/osrs_imports/osrs_anim_2006.anim` (39 bytes)
+  1992→- `models/osrs_imports/osrs_base_47001.base` (16 bytes — 5 bones + labels)
+  1993→
+  1994→Config files:
+  1995→- `scripts/npc/configs/osrs_imports.npc` — contains `[osrs_tormented_demon]`
+  1996→  block with rewritten `model1=osrs_model_46001`, `head1=osrs_model_46002`,
+  1997→  `readyanim=osrs_td_stand`, `walkanim=osrs_td_stand`, `stats=200,150,180,350,1,250`,
+  1998→  and the raw OSRS param refs `param=1234,9502` + `param=1235,9502`.
+  1999→- `scripts/seq/configs/osrs_imports.seq` — contains two blocks:
+  2000→  `[osrs_td_stand]` with `frame1=osrs_anim_2005` + `delay1=2`, and
+  2001→  `[osrs_td_attack]` with `frame1=osrs_anim_2006` + `delay1=2`.
+  2002→
+  2003→Pack files (all under `pack/`):
+  2004→- `model.pack`: `0=osrs_model_46001\n1=osrs_model_46002\n`
+  2005→- `anim.pack`: `0=osrs_anim_2005\n1=osrs_anim_2006\n`
+  2006→- `animset.pack`: `0=osrs_anim_2005\n1=osrs_anim_2006\n`
+  2007→- `base.pack`: `0=osrs_base_47001\n`
+  2008→- `seq.pack`: `0=osrs_td_stand\n1=osrs_td_attack\n`
+  2009→- `npc.pack`: `0=osrs_tormented_demon\n`
+  2010→
+  2011→Dep + variant index files (under `deps/`):
+  2012→- `osrs_tormented_demon.deps.json` — the full DepsMap with every
+  2013→  successfully-imported OSRS node's `transformedFrom` field set to its
+  2014→  new 377 ID.
+  2015→- `variants.json` — single entry: `{legacyNpcId: -1, osrsNpcId: 0,
+  2016→  osrsDebugname: 'osrs_tormented_demon', legacyDebugname: null,
+  2017→  depMapPath: '<...>/osrs_tormented_demon.deps.json', importedAt: <iso>}`.
+  2018→
+  2019→### Don't-pollute-the-real-content-folder guarantee
+  2020→
+  2021→The pilot writes to `<os.tmpdir()>/osrs-pilot-content-<random>/` (NOT the
+  2022→real `lostcity/content/`). Verified post-run:
+  2023→- `/home/z/my-project/lostcity/content/models/osrs_imports/` does NOT exist.
+  2024→- `/home/z/my-project/lostcity/content/deps/osrs_tormented_demon.deps.json`
+  2025→  does NOT exist.
+  2026→- `/home/z/my-project/lostcity/content/deps/variants.json` is still
+  2027→  `{"version":1,"variants":[]}` (the pre-pilot state).
+  2028→
+  2029→The temp content dir is cleaned up on exit unless `--keep-content` is
+  2030→passed. The fixture temp dir is cleaned up on exit unless `--keep-fixture`
+  2031→is passed.
+  2032→
+  2033→### Real-cache runner (Part C — documented in pilot header)
+  2034→
+  2035→To run against a REAL OSRS cache (when the user drops one in):
+  2036→
+  2037→1. Drop cache files into `engine/data/osrs-cache/` (`main_file_cache.dat2`,
+  2038→   `main_file_cache.idx0..255`).
+  2039→2. `cd engine && bun tools/osrs/Import.ts --osrs-cache=data/osrs-cache \\
+  2040→   --npc=<td_npc_id> --group=osrs_imports`
+  2041→3. `bun tools/osrs/UpdateVariantsIndex.ts`
+  2042→4. `bun run build` (the existing LostCity build packs the new content into
+  2043→   the 377 cache that gets served to the client).
+  2044→
+  2045→The real-cache path uses `OsrsCacheAssetReader` (Task 7) instead of
+  2046→`TormentedDemonStubReader`, but every other stage (trace → import →
+  2047→register → index) is identical. So if this pilot passes, the real-cache
+  2048→path will work the same way (modulo any genuine OSRS-cache-specific
+  2049→quirks the fixture doesn't model — e.g. master-index child-name hash
+  2050→resolution).
+  2051→
+  2052→### Verification
+  2053→
+  2054→- **`bun run lint`**: 4 baseline errors (all in `src/io/Packet.ts`) +
+  2055→  15 baseline warnings (all pre-existing). ZERO errors and ZERO warnings
+  2056→  in the new files (`fixtures/TormentedDemonFixture.ts`,
+  2057→  `PilotTormentedDemon.ts`) and the modified file
+  2058→  (`UpdateVariantsIndex.ts`). No regression.
+  2059→
+  2060→- **`bun tools/osrs/PilotTormentedDemon.ts`**: PILOT PASS — 75 assertions
+  2061→  passed, 0 failed. Exit code 0. Summary line:
+  2062→  `PILOT PASS — Tormented Demon imported: 11 nodes traced, 8 files written, 10 pack entries added, 1 variant registered.`
+  2063→
+  2064→- **Real content folder NOT polluted** (verified post-run — see above).
+  2065→
+  2066→### Pilot assertion results breakdown (75 total)
+  2067→
+  2068→| Stage | Assertions | Notes |
+  2069→|-------|------------|-------|
+  2070→| Deps map contents | 16 | 11 node presence + 5 NPC dep kind checks |
+  2071→| Import result | 11 | written/skipped/failed counts + 6 pack-update counts |
+  2072→| Files written to disk | 11 | 5 binary + 2 config files + 4 content checks |
+  2073→| Pack files updated | 13 | 6 pack existence + 7 specific debugname presence |
+  2074→| depMapUpdated transformedFrom | 1 | every importable OSRS node has transformedFrom set |
+  2075→| Variant registration | 5 | variants.json exists, has 1 entry, fields correct |
+  2076→| Index regeneration | 5 | regenerateIndex returns 1, fields preserved |
+  2077→| Updated NPC transformedFrom | 1 | numeric new ID assigned |
+  2078→| Total | 75 | all PASS |
+  2079→
+  2080→### Design decisions / spec-ambiguity resolutions
+  2081→
+  2082→1. **Stub reader returns real `ParamType` stubs for params 1234/1235** —
+  2083→   the dep tracer's `walkParams` only walks a param's VALUE if it can
+  2084→   look up the param's TYPE (via `lookupParamType`). Without a stub
+  2085→   `ParamType` with `type=ScriptVarType.SEQ`, the tracer would log
+  2086→   "param type unknown" and NOT walk the value — meaning the
+  2087→   `seq:9502 → anim:2006` path wouldn't be reached via params. The stub
+  2088→   returns a real `ParamType` with `type=SEQ` so the param-value-walk
+  2089→   code path is exercised. Mirrors what a real OSRS cache would provide
+  2090→   via the (not-yet-ported) `OsrsParamType`.
+  2091→
+  2092→2. **Script-dispatch directive uses the OSRS display name verbatim**
+  2093→   (`[ai_applayer2,Tormented demon]` with space + capital T). The dep
+  2094→   tracer's `findScriptsForNpc()` uses `npc.name` (the display name) as
+  2095→   the script-filename lookup key — which doesn't match LostCity's
+  2096→   lowercase-with-underscores script naming convention. For the pilot,
+  2097→   we sidestep this by also adding a `[ai_applayer2,Tormented demon]`
+  2098→   dispatch directive to the script, which the tracer's dispatch-scan
+  2099→   path picks up via the regex `^\[([a-zA-Z_][a-zA-Z0-9_]*),<escaped
+  2100→   npcName>\]`. This is a known limitation of the dep tracer — the
+  2101→   real-cache path will have the same behavior. Future cleanup: the
+  2102→   tracer should consult `npc.debugname` (via `reader.getName`) instead
+  2103→   of `npc.name` for script lookups.
+  2104→
+  2105→3. **NPC node name updated to sanitized debugname before registering the
+  2106→   variant.** The `VariantRegistry.registerVariant()` and
+  2107→   `UpdateVariantsIndex.processDepsFile()` both pull `osrsDebugname`
+  2108→   from `npcNode.name`. The dep tracer sets `npcNode.name` to the OSRS
+  2109→   display name (e.g. "Tormented demon") — but the variants.json
+  2110→   schema expects the sanitized debugname (e.g.
+  2111→   "osrs_tormented_demon"). The pilot sets `npcNode.name =
+  2112→   writtenNpcEntry.debugname` (the sanitized form returned by the
+  2113→   writer) before calling `registerVariant`. Future cleanup: have
+  2114→   `registerVariant` look up the sanitized debugname from the npc pack
+  2115→   file given the `osrsNpcId` (the `transformedFrom` value) instead
+  2116→   of trusting `npcNode.name`.
+  2117→
+  2118→4. **Writer-skip counts include script + param nodes** — the assertion
+  2119→   expects `skipped=3` (script + 2 params — kinds not yet supported by
+  2120→   `ContentFolderWriter`, per Task 8 worklog "What's stubbed / deferred"
+  2121→   section). The pilot's assertion text documents this explicitly so
+  2122→   future readers don't mistake the skips for failures.
+  2123→
+  2124→5. **`UpdateVariantsIndex.ts` auto-run guarded by `import.meta.main`**
+  2125→   — without this guard, importing the module for its `regenerateIndex`
+  2126→   export (which the pilot does) would trigger the module-level
+  2127→   `main(); process.exit()` calls as a side effect, killing the pilot
+  2128→   process before any of its own code ran. The guard makes the module
+  2129→   importable as a library while preserving its CLI behavior when
+  2130→   invoked directly (`bun tools/osrs/UpdateVariantsIndex.ts`).
+  2131→
+  2132→### Next-action hooks for downstream tasks
+  2133→
+  2134→- **Task 11 (Kalphite Queen pilot):** the existing `ContentFolderWriter`
+  2135→  already handles multi-form NPCs (each form is a separate `npc:` node
+  2136→  in the deps map, walked transitively via `multinpc[]`). Reuse this
+  2137→  pilot's structure — swap the fixture for a KQ-shaped one (2 NPC
+  2138→  configs with `multinpc` pointing at each other), and verify
+  2139→  `traceMany()` + `importMany()` produce 2 NPC config blocks in the
+  2140→  same `.npc` file.
+  2141→
+  2142→- **Future cleanup (dep tracer):** the `findScriptsForNpc()` method
+  2143→  uses `npc.name` (display name) as the script-filename lookup key.
+  2144→  LostCity's script naming convention uses the lowercase debugname.
+  2145→  Update the tracer to consult `reader.getName('npc', id)` (which
+  2146→  prefers `debugname` over `name`) for the script-filename lookup.
+  2147→  The dispatch-scan path works correctly today but the primary-lookup
+  2148→  path misses real LostCity scripts.
+  2149→
+  2150→- **Future cleanup (VariantRegistry):** `registerVariant()` and
+  2151→  `UpdateVariantsIndex.processDepsFile()` both pull `osrsDebugname`
+  2152→  from `npcNode.name` — which is the OSRS display name (e.g.
+  2153→  "Tormented demon") rather than the sanitized debugname. They should
+  2154→  look up the sanitized debugname from `npc.pack` given the
+  2155→  `transformedFrom` value. The pilot works around this by setting
+  2156→  `npcNode.name = writtenNpcEntry.debugname` before calling
+  2157→  `registerVariant`; the real-cache `Import.ts` CLI should do the
+  2158→  same.
+  2159→
+  2160→- **Future cleanup (ContentFolderWriter):** the writer's `processNode`
+  2161→  default case skips obj/param/struct/script/texture/particle/sound
+  2162→  nodes with reason "kind 'X' not yet supported". When `OsrsObjType`
+  2163→  is ported, add a `writeObj()` method that emits an ini-style `.obj`
+  2164→  config block — same pattern as `writeNpcConfig()`. Same for
+  2165→  `OsrsParamType` / `OsrsStructType`. The current skip-with-reason
+  2166→  behavior makes the gap visible in every `ImportResult.skipped[]`.
+  2167→
+  2168→- **Task 12 (agent-browser + lint verify):** this task's lint run is
+  2169→  clean (zero new errors/warnings). The 4 baseline errors in
+  2170→  `src/io/Packet.ts` are unchanged. Future task should hoist the local
+  2171→  `psmartSigned()` helper (currently duplicated in `OsrsModel.ts`,
+  2172→  `OsrsAnimFrame.ts`, and now `TormentedDemonFixture.ts`) into
+  2173→  `Packet.ts` as `psmartSigned()` — per the Task 5-a next-action hook
+  2174→  that's been deferred across three tasks now.
+  2175→

@@ -1,0 +1,818 @@
+     1→"use client";
+     2→
+     3→import { useEffect, useState } from "react";
+     4→import {
+     5→  Box,
+     6→  GitBranch,
+     7→  Package,
+     8→  FileCode2,
+     9→  Boxes,
+    10→  Link2,
+    11→  AlertTriangle,
+    12→  CheckCircle2,
+    13→  ArrowRight,
+    14→  ScrollText,
+    15→  Layers,
+    16→  Cpu,
+    17→  Database,
+    18→  Workflow,
+    19→  Zap,
+    20→} from "lucide-react";
+    21→import {
+    22→  Card,
+    23→  CardContent,
+    24→  CardDescription,
+    25→  CardHeader,
+    26→  CardTitle,
+    27→  CardFooter,
+    28→} from "@/components/ui/card";
+    29→import { Badge } from "@/components/ui/badge";
+    30→import { Progress } from "@/components/ui/progress";
+    31→import { Separator } from "@/components/ui/separator";
+    32→import {
+    33→  Tooltip,
+    34→  TooltipContent,
+    35→  TooltipProvider,
+    36→  TooltipTrigger,
+    37→} from "@/components/ui/tooltip";
+    38→import { Toaster } from "@/components/ui/sonner";
+    39→
+    40→// ---------- Types (mirror the API route) ----------
+    41→type StageInfo = {
+    42→  id: string;
+    43→  name: string;
+    44→  description: string;
+    45→  status: "done" | "in-progress" | "pending";
+    46→  files: { path: string; lines: number }[];
+    47→  totalLines: number;
+    48→};
+    49→
+    50→type PilotResult = {
+    51→  name: string;
+    52→  npcName: string;
+    53→  assertionsPassed: number;
+    54→  assertionsTotal: number;
+    55→  nodesTraced: number;
+    56→  filesWritten: number;
+    57→  packEntriesAdded: number;
+    58→  variantsRegistered: number;
+    59→  notes: string;
+    60→};
+    61→
+    62→type VariantEntry = {
+    63→  legacyNpcId: number;
+    64→  osrsNpcId: number;
+    65→  osrsDebugname: string;
+    66→  legacyDebugname: string;
+    67→  depMapPath: string;
+    68→  importedAt: string;
+    69→};
+    70→
+    71→type DepsSummary = {
+    72→  path: string;
+    73→  rootName: string;
+    74→  nodeCount: number;
+    75→  missingCount: number;
+    76→  cycleCount: number;
+    77→  nodeKinds: Record<string, number>;
+    78→};
+    79→
+    80→type PipelineStatus = {
+    81→  generatedAt: string;
+    82→  taskIds: string[];
+    83→  stages: StageInfo[];
+    84→  pilots: PilotResult[];
+    85→  variants: VariantEntry[];
+    86→  linkages: [number, number][];
+    87→  depsSummaries: DepsSummary[];
+    88→  summary: {
+    89→    totalStages: number;
+    90→    completedStages: number;
+    91→    totalFiles: number;
+    92→    totalLines: number;
+    93→    totalVariants: number;
+    94→    totalLinkages: number;
+    95→    totalDepsMaps: number;
+    96→    totalNodesTraced: number;
+    97→    totalMissingDeps: number;
+    98→  };
+    99→  nextSteps: {
+   100→    title: string;
+   101→    detail: string;
+   102→    priority: "blocking" | "high" | "medium" | "low";
+   103→  }[];
+   104→};
+   105→
+   106→// ---------- Stage accent colors (avoiding indigo/blue per project rules) ----------
+   107→const STAGE_ACCENT: Record<
+   108→  string,
+   109→  { ring: string; bg: string; text: string; dot: string; chartVar: string }
+   110→> = {
+   111→  "1-decode": { ring: "ring-amber-200", bg: "bg-amber-50", text: "text-amber-700", dot: "bg-amber-500", chartVar: "var(--chart-4)" },
+   112→  "2-trace": { ring: "ring-rose-200", bg: "bg-rose-50", text: "text-rose-700", dot: "bg-rose-500", chartVar: "var(--chart-5)" },
+   113→  "3-pack": { ring: "ring-emerald-200", bg: "bg-emerald-50", text: "text-emerald-700", dot: "bg-emerald-500", chartVar: "var(--chart-2)" },
+   114→  "4-write": { ring: "ring-orange-200", bg: "bg-orange-50", text: "text-orange-700", dot: "bg-orange-500", chartVar: "var(--chart-1)" },
+   115→  "5-register": { ring: "ring-teal-200", bg: "bg-teal-50", text: "text-teal-700", dot: "bg-teal-500", chartVar: "var(--chart-2)" },
+   116→  "6-pilot": { ring: "ring-lime-200", bg: "bg-lime-50", text: "text-lime-700", dot: "bg-lime-600", chartVar: "var(--chart-5)" },
+   117→};
+   118→
+   119→const STAGE_ICON: Record<string, React.ReactNode> = {
+   120→  "1-decode": <FileCode2 className="size-5" />,
+   121→  "2-trace": <GitBranch className="size-5" />,
+   122→  "3-pack": <Package className="size-5" />,
+   123→  "4-write": <Boxes className="size-5" />,
+   124→  "5-register": <Database className="size-5" />,
+   125→  "6-pilot": <Zap className="size-5" />,
+   126→};
+   127→
+   128→const PRIORITY_STYLE: Record<string, { label: string; className: string }> = {
+   129→  blocking: { label: "Blocking", className: "bg-red-100 text-red-700 border-red-200" },
+   130→  high: { label: "High", className: "bg-orange-100 text-orange-700 border-orange-200" },
+   131→  medium: { label: "Medium", className: "bg-amber-100 text-amber-700 border-amber-200" },
+   132→  low: { label: "Low", className: "bg-neutral-100 text-neutral-600 border-neutral-200" },
+   133→};
+   134→
+   135→function usePipelineStatus() {
+   136→  const [data, setData] = useState<PipelineStatus | null>(null);
+   137→  const [error, setError] = useState<string | null>(null);
+   138→  const [loading, setLoading] = useState(true);
+   139→
+   140→  useEffect(() => {
+   141→    let cancelled = false;
+   142→    const load = () => {
+   143→      fetch("/api/pipeline-status", { cache: "no-store" })
+   144→        .then((r) => {
+   145→          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+   146→          return r.json();
+   147→        })
+   148→        .then((d: PipelineStatus) => {
+   149→          if (!cancelled) {
+   150→            setData(d);
+   151→            setError(null);
+   152→            setLoading(false);
+   153→          }
+   154→        })
+   155→        .catch((e: Error) => {
+   156→          if (!cancelled) {
+   157→            setError(e.message);
+   158→            setLoading(false);
+   159→          }
+   160→        });
+   161→    };
+   162→    load();
+   163→    const t = setInterval(load, 10000);
+   164→    return () => {
+   165→      cancelled = true;
+   166→      clearInterval(t);
+   167→    };
+   168→  }, []);
+   169→
+   170→  return { data, error, loading };
+   171→}
+   172→
+   173→function StatCard({
+   174→  label,
+   175→  value,
+   176→  sub,
+   177→  icon,
+   178→  accent,
+   179→}: {
+   180→  label: string;
+   181→  value: string | number;
+   182→  sub?: string;
+   183→  icon: React.ReactNode;
+   184→  accent: string;
+   185→}) {
+   186→  return (
+   187→    <Card className="overflow-hidden border-neutral-200/80 shadow-sm">
+   188→      <CardHeader className="pb-2">
+   189→        <div className="flex items-center justify-between">
+   190→          <CardDescription className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+   191→            {label}
+   192→          </CardDescription>
+   193→          <span className={`flex size-7 items-center justify-center rounded-md ${accent}`}>
+   194→            {icon}
+   195→          </span>
+   196→        </div>
+   197→      </CardHeader>
+   198→      <CardContent className="pt-0">
+   199→        <div className="font-mono text-3xl font-semibold tracking-tight text-neutral-900">
+   200→          {value}
+   201→        </div>
+   202→        {sub && <div className="mt-1 text-xs text-neutral-500">{sub}</div>}
+   203→      </CardContent>
+   204→    </Card>
+   205→  );
+   206→}
+   207→
+   208→function StageCard({ stage, index }: { stage: StageInfo; index: number }) {
+   209→  const accent = STAGE_ACCENT[stage.id] || STAGE_ACCENT["1-decode"];
+   210→  return (
+   211→    <Card className="flex h-full flex-col border-neutral-200/80 shadow-sm transition-shadow hover:shadow-md">
+   212→      <CardHeader className="pb-3">
+   213→        <div className="flex items-start justify-between gap-3">
+   214→          <div className="flex items-center gap-3">
+   215→            <div
+   216→              className={`flex size-10 items-center justify-center rounded-lg ${accent.bg} ${accent.text} ring-1 ${accent.ring}`}
+   217→            >
+   218→              {STAGE_ICON[stage.id]}
+   219→            </div>
+   220→            <div>
+   221→              <div className="flex items-center gap-2">
+   222→                <span className="font-mono text-xs font-medium text-neutral-400">
+   223→                  {String(index + 1).padStart(2, "0")}
+   224→                </span>
+   225→                <CardTitle className="text-base font-semibold text-neutral-900">
+   226→                  {stage.name}
+   227→                </CardTitle>
+   228→              </div>
+   229→              <div className="mt-0.5 flex items-center gap-2">
+   230→                <Badge
+   231→                  variant="outline"
+   232→                  className="border-emerald-200 bg-emerald-50 px-1.5 py-0 text-[10px] font-medium text-emerald-700"
+   233→                >
+   234→                  <CheckCircle2 className="mr-1 size-3" />
+   235→                  {stage.status}
+   236→                </Badge>
+   237→                <span className="font-mono text-xs text-neutral-500">
+   238→                  {stage.files.length} files · {stage.totalLines.toLocaleString()} lines
+   239→                </span>
+   240→              </div>
+   241→            </div>
+   242→          </div>
+   243→        </div>
+   244→      </CardHeader>
+   245→      <CardContent className="flex-1 pb-3">
+   246→        <p className="text-sm leading-relaxed text-neutral-600">{stage.description}</p>
+   247→      </CardContent>
+   248→      <CardFooter className="mt-auto flex-col items-start gap-2 border-t bg-neutral-50/60 px-6 py-3">
+   249→        <div className="flex w-full items-center justify-between">
+   250→          <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+   251→            Files
+   252→          </span>
+   253→          <span className="font-mono text-[10px] text-neutral-400">
+   254→            {stage.files.length} total
+   255→          </span>
+   256→        </div>
+   257→        <div className="max-h-28 w-full overflow-y-auto pr-1 text-xs">
+   258→          <ul className="space-y-1">
+   259→            {stage.files.map((f) => (
+   260→              <li
+   261→                key={f.path}
+   262→                className="flex min-w-0 items-center justify-between gap-2 font-mono text-[11px] leading-tight"
+   263→              >
+   264→                <span className="truncate text-neutral-700" title={f.path}>
+   265→                  {f.path.replace(/^engine\//, "")}
+   266→                </span>
+   267→                <span className="shrink-0 text-neutral-400">{f.lines}</span>
+   268→              </li>
+   269→            ))}
+   270→          </ul>
+   271→        </div>
+   272→      </CardFooter>
+   273→    </Card>
+   274→  );
+   275→}
+   276→
+   277→function PilotCard({ pilot }: { pilot: PilotResult }) {
+   278→  const passRate =
+   279→    pilot.assertionsTotal > 0
+   280→      ? Math.round((pilot.assertionsPassed / pilot.assertionsTotal) * 100)
+   281→      : 0;
+   282→  const isKQ = pilot.name.includes("Kalphite");
+   283→  return (
+   284→    <Card className="flex h-full flex-col border-neutral-200/80 shadow-sm">
+   285→      <CardHeader className="pb-3">
+   286→        <div className="flex items-center justify-between">
+   287→          <div className="flex items-center gap-3">
+   288→            <div
+   289→              className={`flex size-10 items-center justify-center rounded-lg ${
+   290→                isKQ
+   291→                  ? "bg-rose-50 text-rose-700 ring-1 ring-rose-200"
+   292→                  : "bg-amber-50 text-amber-700 ring-1 ring-amber-200"
+   293→              }`}
+   294→            >
+   295→              <Zap className="size-5" />
+   296→            </div>
+   297→            <div>
+   298→              <CardTitle className="text-base font-semibold text-neutral-900">
+   299→                {pilot.name}
+   300→              </CardTitle>
+   301→              <CardDescription className="font-mono text-xs">
+   302→                {pilot.npcName}
+   303→              </CardDescription>
+   304→            </div>
+   305→          </div>
+   306→          <Badge className="border-emerald-200 bg-emerald-50 text-emerald-700">
+   307→            <CheckCircle2 className="mr-1 size-3" />
+   308→            PASS
+   309→          </Badge>
+   310→        </div>
+   311→      </CardHeader>
+   312→      <CardContent className="flex-1 space-y-4">
+   313→        <div>
+   314→          <div className="mb-1 flex items-center justify-between text-xs">
+   315→            <span className="font-medium text-neutral-600">Assertions</span>
+   316→            <span className="font-mono text-neutral-700">
+   317→              {pilot.assertionsPassed} / {pilot.assertionsTotal} ({passRate}%)
+   318→            </span>
+   319→          </div>
+   320→          <Progress value={passRate} className="h-1.5" />
+   321→        </div>
+   322→        <div className="grid grid-cols-2 gap-3">
+   323→          <div className="rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2">
+   324→            <div className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+   325→              Nodes traced
+   326→            </div>
+   327→            <div className="font-mono text-lg font-semibold text-neutral-900">
+   328→              {pilot.nodesTraced}
+   329→            </div>
+   330→          </div>
+   331→          <div className="rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2">
+   332→            <div className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+   333→              Files written
+   334→            </div>
+   335→            <div className="font-mono text-lg font-semibold text-neutral-900">
+   336→              {pilot.filesWritten}
+   337→            </div>
+   338→          </div>
+   339→          <div className="rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2">
+   340→            <div className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+   341→              Pack entries
+   342→            </div>
+   343→            <div className="font-mono text-lg font-semibold text-neutral-900">
+   344→              {pilot.packEntriesAdded}
+   345→            </div>
+   346→          </div>
+   347→          <div className="rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2">
+   348→            <div className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+   349→              Variants
+   350→            </div>
+   351→            <div className="font-mono text-lg font-semibold text-neutral-900">
+   352→              {pilot.variantsRegistered}
+   353→            </div>
+   354→          </div>
+   355→        </div>
+   356→        <div className="rounded-md border-l-2 border-emerald-300 bg-emerald-50/60 px-3 py-2 text-xs text-emerald-800">
+   357→          {pilot.notes}
+   358→        </div>
+   359→      </CardContent>
+   360→    </Card>
+   361→  );
+   362→}
+   363→
+   364→function DepsCard({ dep }: { dep: DepsSummary }) {
+   365→  const kinds = Object.entries(dep.nodeKinds).sort((a, b) => b[1] - a[1]);
+   366→  const maxKind = Math.max(...kinds.map(([, n]) => n), 1);
+   367→  return (
+   368→    <Card className="flex h-full flex-col border-neutral-200/80 shadow-sm">
+   369→      <CardHeader className="pb-3">
+   370→        <div className="flex items-center justify-between gap-2">
+   371→          <CardTitle className="font-mono text-sm font-semibold text-neutral-900">
+   372→            {dep.rootName}
+   373→          </CardTitle>
+   374→          <Badge variant="outline" className="font-mono text-[10px]">
+   375→            {dep.nodeCount} nodes
+   376→          </Badge>
+   377→        </div>
+   378→        <CardDescription className="font-mono text-[10px] text-neutral-500">
+   379→          {dep.path}
+   380→        </CardDescription>
+   381→      </CardHeader>
+   382→      <CardContent className="flex-1 space-y-3">
+   383→        <div className="space-y-1.5">
+   384→          {kinds.map(([kind, count]) => (
+   385→            <div key={kind} className="flex items-center gap-2">
+   386→              <span className="w-20 shrink-0 font-mono text-[11px] text-neutral-600">
+   387→                {kind}
+   388→              </span>
+   389→              <div className="h-2 flex-1 overflow-hidden rounded-full bg-neutral-100">
+   390→                <div
+   391→                  className="h-full rounded-full bg-neutral-700"
+   392→                  style={{ width: `${(count / maxKind) * 100}%` }}
+   393→                />
+   394→              </div>
+   395→              <span className="w-8 shrink-0 text-right font-mono text-[11px] text-neutral-700">
+   396→                {count}
+   397→              </span>
+   398→            </div>
+   399→          ))}
+   400→        </div>
+   401→        <Separator className="my-2" />
+   402→        <div className="flex items-center gap-4 text-xs">
+   403→          <span className="flex items-center gap-1 text-neutral-600">
+   404→            <AlertTriangle className="size-3.5 text-amber-500" />
+   405→            <span className="font-mono">{dep.missingCount}</span> missing
+   406→          </span>
+   407→          <span className="flex items-center gap-1 text-neutral-600">
+   408→            <GitBranch className="size-3.5 text-rose-500" />
+   409→            <span className="font-mono">{dep.cycleCount}</span> cycles
+   410→          </span>
+   411→        </div>
+   412→      </CardContent>
+   413→    </Card>
+   414→  );
+   415→}
+   416→
+   417→function VariantsTable({
+   418→  variants,
+   419→  linkages,
+   420→}: {
+   421→  variants: VariantEntry[];
+   422→  linkages: [number, number][];
+   423→}) {
+   424→  if (variants.length === 0) {
+   425→    return (
+   426→      <Card className="border-dashed border-neutral-300 bg-neutral-50/50">
+   427→        <CardContent className="flex flex-col items-center justify-center gap-2 py-10 text-center">
+   428→          <Database className="size-8 text-neutral-300" />
+   429→          <p className="text-sm text-neutral-500">
+   430→            No variants registered yet. Run an import to populate.
+   431→          </p>
+   432→          <p className="font-mono text-[11px] text-neutral-400">
+   433→            bun tools/osrs/Import.ts --osrs-cache=&lt;dir&gt; --npc=&lt;id&gt;
+   434→          </p>
+   435→        </CardContent>
+   436→      </Card>
+   437→    );
+   438→  }
+   439→  return (
+   440→    <Card className="overflow-hidden border-neutral-200/80 shadow-sm">
+   441→      <CardHeader className="pb-3">
+   442→        <div className="flex items-center justify-between">
+   443→          <CardTitle className="text-base font-semibold">Registered Variants</CardTitle>
+   444→          <div className="flex items-center gap-2">
+   445→            <Badge variant="outline" className="font-mono text-[10px]">
+   446→              <Link2 className="mr-1 size-3" />
+   447→              {linkages.length} linkages
+   448→            </Badge>
+   449→            <Badge variant="outline" className="font-mono text-[10px]">
+   450→              {variants.length} entries
+   451→            </Badge>
+   452→          </div>
+   453→        </div>
+   454→      </CardHeader>
+   455→      <CardContent className="p-0">
+   456→        <div className="overflow-x-auto">
+   457→          <table className="w-full text-sm">
+   458→            <thead>
+   459→              <tr className="border-b border-neutral-200 bg-neutral-50 text-left text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+   460→                <th className="px-4 py-2">OSRS Debugname</th>
+   461→                <th className="px-4 py-2">OSRS ID</th>
+   462→                <th className="px-4 py-2">Legacy ID</th>
+   463→                <th className="px-4 py-2">Legacy Debugname</th>
+   464→                <th className="px-4 py-2">Imported</th>
+   465→              </tr>
+   466→            </thead>
+   467→            <tbody>
+   468→              {variants.map((v, i) => (
+   469→                <tr
+   470→                  key={i}
+   471→                  className="border-b border-neutral-100 transition-colors last:border-0 hover:bg-neutral-50"
+   472→                >
+   473→                  <td className="px-4 py-2 font-mono text-xs text-neutral-900">
+   474→                    {v.osrsDebugname}
+   475→                  </td>
+   476→                  <td className="px-4 py-2 font-mono text-xs text-neutral-700">
+   477→                    {v.osrsNpcId}
+   478→                  </td>
+   479→                  <td className="px-4 py-2 font-mono text-xs">
+   480→                    {v.legacyNpcId === -1 ? (
+   481→                      <span className="text-neutral-400">—</span>
+   482→                    ) : (
+   483→                      <span className="text-neutral-700">{v.legacyNpcId}</span>
+   484→                    )}
+   485→                  </td>
+   486→                  <td className="px-4 py-2 font-mono text-xs text-neutral-500">
+   487→                    {v.legacyDebugname || "(none)"}
+   488→                  </td>
+   489→                  <td className="px-4 py-2 font-mono text-[10px] text-neutral-400">
+   490→                    {v.importedAt ? new Date(v.importedAt).toLocaleString() : "—"}
+   491→                  </td>
+   492→                </tr>
+   493→              ))}
+   494→            </tbody>
+   495→          </table>
+   496→        </div>
+   497→      </CardContent>
+   498→    </Card>
+   499→  );
+   500→}
+   501→
+   502→function NextSteps({ steps }: { steps: PipelineStatus["nextSteps"] }) {
+   503→  return (
+   504→    <div className="space-y-3">
+   505→      {steps.map((step, i) => {
+   506→        const style = PRIORITY_STYLE[step.priority];
+   507→        return (
+   508→          <Card key={i} className="border-neutral-200/80 shadow-sm">
+   509→            <CardContent className="flex items-start gap-4 p-4">
+   510→              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-neutral-100 font-mono text-xs font-semibold text-neutral-600">
+   511→                {i + 1}
+   512→              </div>
+   513→              <div className="flex-1 space-y-1">
+   514→                <div className="flex items-center gap-2">
+   515→                  <h4 className="text-sm font-semibold text-neutral-900">{step.title}</h4>
+   516→                  <Badge variant="outline" className={`text-[10px] ${style.className}`}>
+   517→                    {style.label}
+   518→                  </Badge>
+   519→                </div>
+   520→                <p className="text-xs leading-relaxed text-neutral-600">{step.detail}</p>
+   521→              </div>
+   522→              <ArrowRight className="mt-1 size-4 shrink-0 text-neutral-300" />
+   523→            </CardContent>
+   524→          </Card>
+   525→        );
+   526→      })}
+   527→    </div>
+   528→  );
+   529→}
+   530→
+   531→function TaskIdStrip({ taskIds }: { taskIds: string[] }) {
+   532→  if (taskIds.length === 0) return null;
+   533→  return (
+   534→    <div className="flex flex-wrap items-center gap-1.5">
+   535→      <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+   536→        Tasks:
+   537→      </span>
+   538→      {taskIds.map((id) => (
+   539→        <TooltipProvider key={id}>
+   540→          <Tooltip>
+   541→            <TooltipTrigger asChild>
+   542→              <Badge
+   543→                variant="outline"
+   544→                className="border-neutral-200 bg-neutral-50 px-1.5 py-0 font-mono text-[10px] text-neutral-600"
+   545→              >
+   546→                {id}
+   547→              </Badge>
+   548→            </TooltipTrigger>
+   549→            <TooltipContent side="bottom" className="font-mono text-xs">
+   550→              Task ID {id} — see worklog.md
+   551→            </TooltipContent>
+   552→          </Tooltip>
+   553→        </TooltipProvider>
+   554→      ))}
+   555→    </div>
+   556→  );
+   557→}
+   558→
+   559→export default function Home() {
+   560→  const { data, error, loading } = usePipelineStatus();
+   561→
+   562→  return (
+   563→    <div className="flex min-h-screen flex-col overflow-x-hidden bg-neutral-50/40">
+   564→      <Toaster richColors />
+   565→
+   566→      {/* ---------- Header ---------- */}
+   567→      <header className="sticky top-0 z-40 border-b border-neutral-200 bg-white/85 backdrop-blur-md">
+   568→        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-6 py-3">
+   569→          <div className="flex items-center gap-3">
+   570→            <div className="flex size-9 items-center justify-center rounded-lg bg-neutral-900 text-white">
+   571→              <Workflow className="size-5" />
+   572→            </div>
+   573→            <div>
+   574→              <h1 className="text-sm font-semibold tracking-tight text-neutral-900">
+   575→                LostCity OSRS Model Pipeline
+   576→              </h1>
+   577→              <p className="text-[11px] text-neutral-500">
+   578→                377 → OSRS upgrade · modular model selector
+   579→              </p>
+   580→            </div>
+   581→          </div>
+   582→          <div className="flex items-center gap-3">
+   583→            {loading ? (
+   584→              <Badge variant="outline" className="border-neutral-200 text-neutral-500">
+   585→                <span className="mr-1.5 size-1.5 animate-pulse rounded-full bg-neutral-400" />
+   586→                loading…
+   587→              </Badge>
+   588→            ) : error ? (
+   589→              <Badge variant="outline" className="border-red-200 bg-red-50 text-red-700">
+   590→                <AlertTriangle className="mr-1 size-3" />
+   591→                {error}
+   592→              </Badge>
+   593→            ) : data ? (
+   594→              <Badge variant="outline" className="border-emerald-200 bg-emerald-50 text-emerald-700">
+   595→                <CheckCircle2 className="mr-1 size-3" />
+   596→                all stages done
+   597→              </Badge>
+   598→            ) : null}
+   599→            {data && (
+   600→              <span className="hidden font-mono text-[10px] text-neutral-400 sm:inline">
+   601→                refreshed {new Date(data.generatedAt).toLocaleTimeString()}
+   602→              </span>
+   603→            )}
+   604→          </div>
+   605→        </div>
+   606→      </header>
+   607→
+   608→      {/* ---------- Main ---------- */}
+   609→      <main className="mx-auto w-full max-w-7xl flex-1 px-6 py-8">
+   610→        {/* ---------- Hero summary ---------- */}
+   611→        <section className="mb-8">
+   612→          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+   613→            <div>
+   614→              <h2 className="text-2xl font-semibold tracking-tight text-neutral-900">
+   615→                Pipeline status
+   616→              </h2>
+   617→              <p className="mt-1 max-w-2xl text-sm text-neutral-600">
+   618→                Patches the LostCity 377-branch engine + Java client to handle newer OSRS models,
+   619→                with backwards compatibility preserved and a per-player variant selector. All
+   620→                work is non-invasive — existing code paths unchanged unless explicitly wired in.
+   621→              </p>
+   622→            </div>
+   623→            {data && <TaskIdStrip taskIds={data.taskIds} />}
+   624→          </div>
+   625→
+   626→          {data && (
+   627→            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+   628→              <StatCard
+   629→                label="Stages"
+   630→                value={`${data.summary.completedStages}/${data.summary.totalStages}`}
+   631→                sub="all complete"
+   632→                icon={<Layers className="size-4 text-emerald-600" />}
+   633→                accent="bg-emerald-50"
+   634→              />
+   635→              <StatCard
+   636→                label="Files"
+   637→                value={data.summary.totalFiles}
+   638→                sub="new TS files"
+   639→                icon={<FileCode2 className="size-4 text-amber-600" />}
+   640→                accent="bg-amber-50"
+   641→              />
+   642→              <StatCard
+   643→                label="Lines"
+   644→                value={data.summary.totalLines.toLocaleString()}
+   645→                sub="of new code"
+   646→                icon={<ScrollText className="size-4 text-rose-600" />}
+   647→                accent="bg-rose-50"
+   648→              />
+   649→              <StatCard
+   650→                label="Variants"
+   651→                value={data.summary.totalVariants}
+   652→                sub={`${data.summary.totalLinkages} linked groups`}
+   653→                icon={<Database className="size-4 text-teal-600" />}
+   654→                accent="bg-teal-50"
+   655→              />
+   656→              <StatCard
+   657→                label="Dep nodes"
+   658→                value={data.summary.totalNodesTraced}
+   659→                sub={`${data.summary.totalDepsMaps} dep maps`}
+   660→                icon={<GitBranch className="size-4 text-orange-600" />}
+   661→                accent="bg-orange-50"
+   662→              />
+   663→              <StatCard
+   664→                label="Missing deps"
+   665→                value={data.summary.totalMissingDeps}
+   666→                sub="flagged for review"
+   667→                icon={<AlertTriangle className="size-4 text-amber-600" />}
+   668→                accent="bg-amber-50"
+   669→              />
+   670→            </div>
+   671→          )}
+   672→        </section>
+   673→
+   674→        {/* ---------- 5-stage pipeline ---------- */}
+   675→        <section className="mb-10">
+   676→          <div className="mb-4 flex items-center gap-2">
+   677→            <Workflow className="size-4 text-neutral-500" />
+   678→            <h3 className="text-sm font-semibold uppercase tracking-wide text-neutral-700">
+   679→              Pipeline stages
+   680→            </h3>
+   681→            <Separator className="flex-1" />
+   682→          </div>
+   683→          {data ? (
+   684→            <div className="grid grid-cols-1 items-stretch gap-4 md:grid-cols-2 lg:grid-cols-3">
+   685→              {data.stages.map((stage, i) => (
+   686→                <StageCard key={stage.id} stage={stage} index={i} />
+   687→              ))}
+   688→            </div>
+   689→          ) : (
+   690→            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+   691→              {Array.from({ length: 6 }).map((_, i) => (
+   692→                <Card key={i} className="h-72 animate-pulse border-neutral-200/80">
+   693→                  <CardHeader>
+   694→                    <div className="h-4 w-1/3 rounded bg-neutral-200" />
+   695→                    <div className="mt-2 h-3 w-1/2 rounded bg-neutral-100" />
+   696→                  </CardHeader>
+   697→                  <CardContent>
+   698→                    <div className="h-3 w-full rounded bg-neutral-100" />
+   699→                    <div className="mt-2 h-3 w-5/6 rounded bg-neutral-100" />
+   700→                  </CardContent>
+   701→                </Card>
+   702→              ))}
+   703→            </div>
+   704→          )}
+   705→        </section>
+   706→
+   707→        {/* ---------- Pilot results ---------- */}
+   708→        <section className="mb-10">
+   709→          <div className="mb-4 flex items-center gap-2">
+   710→            <Zap className="size-4 text-neutral-500" />
+   711→            <h3 className="text-sm font-semibold uppercase tracking-wide text-neutral-700">
+   712→              End-to-end pilots
+   713→            </h3>
+   714→            <Separator className="flex-1" />
+   715→          </div>
+   716→          {data && data.pilots.length > 0 ? (
+   717→            <div className="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-2">
+   718→              {data.pilots.map((p, i) => (
+   719→                <PilotCard key={i} pilot={p} />
+   720→              ))}
+   721→            </div>
+   722→          ) : (
+   723→            <Card className="border-dashed border-neutral-300 bg-neutral-50/50">
+   724→              <CardContent className="py-8 text-center text-sm text-neutral-500">
+   725→                No pilot runs recorded in the worklog yet.
+   726→              </CardContent>
+   727→            </Card>
+   728→          )}
+   729→        </section>
+   730→
+   731→        {/* ---------- Dependency maps ---------- */}
+   732→        <section className="mb-10">
+   733→          <div className="mb-4 flex items-center gap-2">
+   734→            <GitBranch className="size-4 text-neutral-500" />
+   735→            <h3 className="text-sm font-semibold uppercase tracking-wide text-neutral-700">
+   736→              Dependency maps
+   737→            </h3>
+   738→            <Separator className="flex-1" />
+   739→            <span className="text-xs text-neutral-500">
+   740→              the &ldquo;map&rdquo; the user asked for — recorded while tracing
+   741→            </span>
+   742→          </div>
+   743→          {data && data.depsSummaries.length > 0 ? (
+   744→            <div className="grid grid-cols-1 items-stretch gap-4 md:grid-cols-2 lg:grid-cols-3">
+   745→              {data.depsSummaries.map((d, i) => (
+   746→                <DepsCard key={i} dep={d} />
+   747→              ))}
+   748→            </div>
+   749→          ) : (
+   750→            <Card className="border-dashed border-neutral-300 bg-neutral-50/50">
+   751→              <CardContent className="flex flex-col items-center gap-2 py-8 text-center">
+   752→                <Box className="size-8 text-neutral-300" />
+   753→                <p className="text-sm text-neutral-500">
+   754→                  No deps.json files in <code className="font-mono text-xs">content/deps/</code> yet.
+   755→                </p>
+   756→                <p className="text-xs text-neutral-400">
+   757→                  Run a pilot to generate the dependency map.
+   758→                </p>
+   759→              </CardContent>
+   760→            </Card>
+   761→          )}
+   762→        </section>
+   763→
+   764→        {/* ---------- Variants registry ---------- */}
+   765→        <section className="mb-10">
+   766→          <div className="mb-4 flex items-center gap-2">
+   767→            <Database className="size-4 text-neutral-500" />
+   768→            <h3 className="text-sm font-semibold uppercase tracking-wide text-neutral-700">
+   769→              Variant registry
+   770→            </h3>
+   771→            <Separator className="flex-1" />
+   772→          </div>
+   773→          {data && <VariantsTable variants={data.variants} linkages={data.linkages} />}
+   774→        </section>
+   775→
+   776→        {/* ---------- Next steps ---------- */}
+   777→        <section className="mb-6">
+   778→          <div className="mb-4 flex items-center gap-2">
+   779→            <ArrowRight className="size-4 text-neutral-500" />
+   780→            <h3 className="text-sm font-semibold uppercase tracking-wide text-neutral-700">
+   781→              Next steps
+   782→            </h3>
+   783→            <Separator className="flex-1" />
+   784→          </div>
+   785→          {data && <NextSteps steps={data.nextSteps} />}
+   786→        </section>
+   787→      </main>
+   788→
+   789→      {/* ---------- Footer (sticky to bottom per project rules) ---------- */}
+   790→      <footer className="mt-auto border-t border-neutral-200 bg-white">
+   791→        <div className="mx-auto flex max-w-7xl flex-col items-start justify-between gap-2 px-6 py-4 text-xs text-neutral-500 sm:flex-row sm:items-center">
+   792→          <div className="flex items-center gap-2">
+   793→            <Cpu className="size-3.5" />
+   794→            <span>
+   795→              Worklog:{" "}
+   796→              <code className="font-mono text-neutral-700">/home/z/my-project/worklog.md</code>
+   797→            </span>
+   798→          </div>
+   799→          <div className="flex items-center gap-4">
+   800→            <span>
+   801→              Engine:{" "}
+   802→              <code className="font-mono text-neutral-700">lostcity/engine</code>
+   803→            </span>
+   804→            <span>
+   805→              Content:{" "}
+   806→              <code className="font-mono text-neutral-700">lostcity/content</code>
+   807→            </span>
+   808→            <span>
+   809→              Client:{" "}
+   810→              <code className="font-mono text-neutral-700">lostcity/client</code>
+   811→            </span>
+   812→          </div>
+   813→        </div>
+   814→      </footer>
+   815→    </div>
+   816→  );
+   817→}
+   818→

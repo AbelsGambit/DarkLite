@@ -1,0 +1,2002 @@
+     1→package jagex2.dash3d;
+     2→
+     3→import deob.ObfuscatedName;
+     4→import jagex2.graphics.Pix2D;
+     5→import jagex2.graphics.Pix3D;
+     6→import jagex2.io.OnDemandProvider;
+     7→import jagex2.io.Packet;
+     8→
+     9→public class Model extends ModelSource {
+    10→
+    11→        @ObfuscatedName("LZYQDKJV.eb")
+    12→        public boolean field1227 = false;
+    13→
+    14→        @ObfuscatedName("LZYQDKJV.y")
+    15→        public int field1195;
+    16→
+    17→        @ObfuscatedName("LZYQDKJV.C")
+    18→        public int field1199;
+    19→
+    20→        @ObfuscatedName("LZYQDKJV.O")
+    21→        public int field1211;
+    22→
+    23→        @ObfuscatedName("LZYQDKJV.z")
+    24→        public int[] field1196;
+    25→
+    26→        @ObfuscatedName("LZYQDKJV.A")
+    27→        public int[] field1197;
+    28→
+    29→        @ObfuscatedName("LZYQDKJV.B")
+    30→        public int[] field1198;
+    31→
+    32→        @ObfuscatedName("LZYQDKJV.D")
+    33→        public int[] field1200;
+    34→
+    35→        @ObfuscatedName("LZYQDKJV.E")
+    36→        public int[] field1201;
+    37→
+    38→        @ObfuscatedName("LZYQDKJV.F")
+    39→        public int[] field1202;
+    40→
+    41→        @ObfuscatedName("LZYQDKJV.P")
+    42→        public int[] field1212;
+    43→
+    44→        @ObfuscatedName("LZYQDKJV.Q")
+    45→        public int[] field1213;
+    46→
+    47→        @ObfuscatedName("LZYQDKJV.R")
+    48→        public int[] field1214;
+    49→
+    50→        @ObfuscatedName("LZYQDKJV.ab")
+    51→        public int[] field1223;
+    52→
+    53→        @ObfuscatedName("LZYQDKJV.J")
+    54→        public int[] field1206;
+    55→
+    56→        @ObfuscatedName("LZYQDKJV.K")
+    57→        public int[] field1207;
+    58→
+    59→        @ObfuscatedName("LZYQDKJV.N")
+    60→        public int field1210;
+    61→
+    62→        @ObfuscatedName("LZYQDKJV.L")
+    63→        public int[] field1208;
+    64→
+    65→        @ObfuscatedName("LZYQDKJV.bb")
+    66→        public int[] field1224;
+    67→
+    68→        @ObfuscatedName("LZYQDKJV.M")
+    69→        public int[] faceColour;
+    70→
+    71→        @ObfuscatedName("LZYQDKJV.G")
+    72→        public int[] field1203;
+    73→
+    74→        @ObfuscatedName("LZYQDKJV.H")
+    75→        public int[] field1204;
+    76→
+    77→        @ObfuscatedName("LZYQDKJV.I")
+    78→        public int[] field1205;
+    79→
+    80→        @ObfuscatedName("LZYQDKJV.fb")
+    81→        public VertexNormal[] field1228;
+    82→
+    83→        @ObfuscatedName("LZYQDKJV.W")
+    84→        public int field1219;
+    85→
+    86→        @ObfuscatedName("LZYQDKJV.V")
+    87→        public int field1218;
+    88→
+    89→        @ObfuscatedName("LZYQDKJV.Y")
+    90→        public int field1221;
+    91→
+    92→        @ObfuscatedName("LZYQDKJV.X")
+    93→        public int field1220;
+    94→
+    95→        @ObfuscatedName("LZYQDKJV.T")
+    96→        public int field1216;
+    97→
+    98→        @ObfuscatedName("LZYQDKJV.U")
+    99→        public int field1217;
+   100→
+   101→        @ObfuscatedName("LZYQDKJV.S")
+   102→        public int field1215;
+   103→
+   104→        @ObfuscatedName("LZYQDKJV.t")
+   105→        public static Model field1190 = new Model(852);
+   106→
+   107→        @ObfuscatedName("LZYQDKJV.u")
+   108→        public static int[] field1191 = new int[2000];
+   109→
+   110→        @ObfuscatedName("LZYQDKJV.v")
+   111→        public static int[] field1192 = new int[2000];
+   112→
+   113→        @ObfuscatedName("LZYQDKJV.w")
+   114→        public static int[] field1193 = new int[2000];
+   115→
+   116→        @ObfuscatedName("LZYQDKJV.x")
+   117→        public static int[] field1194 = new int[2000];
+   118→
+   119→        @ObfuscatedName("LZYQDKJV.ib")
+   120→        public static boolean[] field1231 = new boolean[4096];
+   121→
+   122→        @ObfuscatedName("LZYQDKJV.jb")
+   123→        public static boolean[] field1232 = new boolean[4096];
+   124→
+   125→        @ObfuscatedName("LZYQDKJV.kb")
+   126→        public static int[] field1233 = new int[4096];
+   127→
+   128→        @ObfuscatedName("LZYQDKJV.lb")
+   129→        public static int[] field1234 = new int[4096];
+   130→
+   131→        @ObfuscatedName("LZYQDKJV.mb")
+   132→        public static int[] field1235 = new int[4096];
+   133→
+   134→        @ObfuscatedName("LZYQDKJV.nb")
+   135→        public static int[] field1236 = new int[4096];
+   136→
+   137→        @ObfuscatedName("LZYQDKJV.ob")
+   138→        public static int[] field1237 = new int[4096];
+   139→
+   140→        @ObfuscatedName("LZYQDKJV.pb")
+   141→        public static int[] field1238 = new int[4096];
+   142→
+   143→        @ObfuscatedName("LZYQDKJV.qb")
+   144→        public static int[] field1239 = new int[1500];
+   145→
+   146→        @ObfuscatedName("LZYQDKJV.rb")
+   147→        public static int[][] field1240 = new int[1500][512];
+   148→
+   149→        @ObfuscatedName("LZYQDKJV.sb")
+   150→        public static int[] field1241 = new int[12];
+   151→
+   152→        @ObfuscatedName("LZYQDKJV.tb")
+   153→        public static int[][] field1242 = new int[12][2000];
+   154→
+   155→        @ObfuscatedName("LZYQDKJV.ub")
+   156→        public static int[] field1243 = new int[2000];
+   157→
+   158→        @ObfuscatedName("LZYQDKJV.vb")
+   159→        public static int[] field1244 = new int[2000];
+   160→
+   161→        @ObfuscatedName("LZYQDKJV.wb")
+   162→        public static int[] field1245 = new int[12];
+   163→
+   164→        @ObfuscatedName("LZYQDKJV.xb")
+   165→        public static int[] field1246 = new int[10];
+   166→
+   167→        @ObfuscatedName("LZYQDKJV.yb")
+   168→        public static int[] field1247 = new int[10];
+   169→
+   170→        @ObfuscatedName("LZYQDKJV.zb")
+   171→        public static int[] field1248 = new int[10];
+   172→
+   173→        @ObfuscatedName("LZYQDKJV.Hb")
+   174→        public static int[] field1256 = new int[1000];
+   175→
+   176→        @ObfuscatedName("LZYQDKJV.Ib")
+   177→        public static int[] sinTable = Pix3D.sinTable;
+   178→
+   179→        @ObfuscatedName("LZYQDKJV.Jb")
+   180→        public static int[] cosTable = Pix3D.cosTable;
+   181→
+   182→        @ObfuscatedName("LZYQDKJV.Kb")
+   183→        public static int[] field1259 = Pix3D.colourTable;
+   184→
+   185→        @ObfuscatedName("LZYQDKJV.Lb")
+   186→        public static int[] field1260 = Pix3D.divTable2;
+   187→
+   188→        @ObfuscatedName("LZYQDKJV.s")
+   189→        public static int field1189;
+   190→
+   191→        @ObfuscatedName("LZYQDKJV.Z")
+   192→        public int field1222;
+   193→
+   194→        @ObfuscatedName("LZYQDKJV.Ab")
+   195→        public static int field1249;
+   196→
+   197→        @ObfuscatedName("LZYQDKJV.Bb")
+   198→        public static int field1250;
+   199→
+   200→        @ObfuscatedName("LZYQDKJV.Cb")
+   201→        public static int field1251;
+   202→
+   203→        @ObfuscatedName("LZYQDKJV.Eb")
+   204→        public static int mouseX;
+   205→
+   206→        @ObfuscatedName("LZYQDKJV.Fb")
+   207→        public static int mouseY;
+   208→
+   209→        @ObfuscatedName("LZYQDKJV.Gb")
+   210→        public static int pickedCount;
+   211→
+   212→        @ObfuscatedName("LZYQDKJV.hb")
+   213→        public static OnDemandProvider field1230;
+   214→
+   215→        @ObfuscatedName("LZYQDKJV.Db")
+   216→        public static boolean checkHover;
+   217→
+   218→        @ObfuscatedName("LZYQDKJV.gb")
+   219→        public static Metadata[] field1229;
+   220→
+   221→        @ObfuscatedName("LZYQDKJV.cb")
+   222→        public int[][] field1225;
+   223→
+   224→        @ObfuscatedName("LZYQDKJV.db")
+   225→        public int[][] field1226;
+   226→
+   227→        @ObfuscatedName("LZYQDKJV.a(Z)V")
+   228→        public static void unload() {
+   229→                field1229 = null;
+   230→                field1231 = null;
+   231→                field1232 = null;
+   232→                field1233 = null;
+   233→                field1234 = null;
+   234→                field1235 = null;
+   235→                field1236 = null;
+   236→                field1237 = null;
+   237→                field1238 = null;
+   238→                field1239 = null;
+   239→                field1240 = null;
+   240→                field1241 = null;
+   241→                field1242 = null;
+   242→                field1243 = null;
+   243→                field1244 = null;
+   244→                field1245 = null;
+   245→                sinTable = null;
+   246→                cosTable = null;
+   247→                field1259 = null;
+   248→                field1260 = null;
+   249→        }
+   250→
+   251→        @ObfuscatedName("LZYQDKJV.a(ILQUWTPUDC;)V")
+   252→        public static void init(int arg0, OnDemandProvider arg1) {
+   253→                field1229 = new Metadata[arg0];
+   254→                field1230 = arg1;
+   255→        }
+   256→
+   257→        @ObfuscatedName("LZYQDKJV.a([BIB)V")
+   258→        public static void method357(byte[] arg0, int arg1, byte arg2) {
+   259→                if (arg2 != 7) {
+   260→                        return;
+   261→                }
+   262→                if (arg0 == null) {
+   263→                        Metadata var3 = field1229[arg1] = new Metadata();
+   264→                        var3.field1111 = 0;
+   265→                        var3.field1112 = 0;
+   266→                        var3.field1113 = 0;
+   267→                        return;
+   268→                }
+   269→                Packet var4 = new Packet(arg0);
+   270→                var4.pos = arg0.length - 18;
+   271→                Metadata var5 = field1229[arg1] = new Metadata();
+   272→                var5.field1110 = arg0;
+   273→                var5.field1111 = var4.g2();
+   274→                var5.field1112 = var4.g2();
+   275→                var5.field1113 = var4.g1();
+   276→                int var6 = var4.g1();
+   277→                int var7 = var4.g1();
+   278→                int var8 = var4.g1();
+   279→                int var9 = var4.g1();
+   280→                int var10 = var4.g1();
+   281→                int var11 = var4.g2();
+   282→                int var12 = var4.g2();
+   283→                int var13 = var4.g2();
+   284→                int var14 = var4.g2();
+   285→                byte var15 = 0;
+   286→                var5.field1114 = var15;
+   287→                int var16 = var5.field1111 + var15;
+   288→                var5.field1120 = var16;
+   289→                int var17 = var5.field1112 + var16;
+   290→                var5.field1123 = var17;
+   291→                if (var7 == 255) {
+   292→                        var17 += var5.field1112;
+   293→                } else {
+   294→                        var5.field1123 = -var7 - 1;
+   295→                }
+   296→                var5.field1125 = var17;
+   297→                if (var9 == 1) {
+   298→                        var17 += var5.field1112;
+   299→                } else {
+   300→                        var5.field1125 = -1;
+   301→                }
+   302→                var5.field1122 = var17;
+   303→                if (var6 == 1) {
+   304→                        var17 += var5.field1112;
+   305→                } else {
+   306→                        var5.field1122 = -1;
+   307→                }
+   308→                var5.field1118 = var17;
+   309→                if (var10 == 1) {
+   310→                        var17 += var5.field1111;
+   311→                } else {
+   312→                        var5.field1118 = -1;
+   313→                }
+   314→                var5.field1124 = var17;
+   315→                if (var8 == 1) {
+   316→                        var17 += var5.field1112;
+   317→                } else {
+   318→                        var5.field1124 = -1;
+   319→                }
+   320→                var5.field1119 = var17;
+   321→                int var18 = var14 + var17;
+   322→                var5.field1121 = var18;
+   323→                int var19 = var5.field1112 * 2 + var18;
+   324→                var5.field1126 = var19;
+   325→                int var20 = var5.field1113 * 6 + var19;
+   326→                var5.field1115 = var20;
+   327→                int var21 = var11 + var20;
+   328→                var5.field1116 = var21;
+   329→                int var22 = var12 + var21;
+   330→                var5.field1117 = var22;
+   331→                int var10000 = var13 + var22;
+   332→        }
+   333→
+   334→        @ObfuscatedName("LZYQDKJV.a(II)V")
+   335→        public static void method358(int arg0) {
+   336→                field1229[arg0] = null;
+   337→        }
+   338→
+   339→        @ObfuscatedName("LZYQDKJV.a(I)LLZYQDKJV;")
+   340→        public static Model tryGet(int arg0) {
+   341→                if (field1229 == null) {
+   342→                        return null;
+   343→                }
+   344→                Metadata var1 = field1229[arg0];
+   345→                if (var1 == null) {
+   346→                        field1230.requestModel(arg0);
+   347→                        return null;
+   348→                } else {
+   349→                        return new Model(arg0, -478);
+   350→                }
+   351→        }
+   352→
+   353→        @ObfuscatedName("LZYQDKJV.b(I)Z")
+   354→        public static boolean method360(int arg0) {
+   355→                if (field1229 == null) {
+   356→                        return false;
+   357→                }
+   358→                Metadata var1 = field1229[arg0];
+   359→                if (var1 == null) {
+   360→                        field1230.requestModel(arg0);
+   361→                        return false;
+   362→                } else {
+   363→                        return true;
+   364→                }
+   365→        }
+   366→
+   367→        public Model(int arg0) {
+   368→        }
+   369→
+   370→        public Model(int arg0, int arg1) {
+   371→                field1189++;
+   372→                Metadata var3 = field1229[arg0];
+   373→                this.field1195 = var3.field1111;
+   374→                this.field1199 = var3.field1112;
+   375→                this.field1211 = var3.field1113;
+   376→                this.field1196 = new int[this.field1195];
+   377→                this.field1197 = new int[this.field1195];
+   378→                this.field1198 = new int[this.field1195];
+   379→                this.field1200 = new int[this.field1199];
+   380→                this.field1201 = new int[this.field1199];
+   381→                this.field1202 = new int[this.field1199];
+   382→                this.field1212 = new int[this.field1211];
+   383→                this.field1213 = new int[this.field1211];
+   384→                this.field1214 = new int[this.field1211];
+   385→                if (var3.field1118 >= 0) {
+   386→                        this.field1223 = new int[this.field1195];
+   387→                }
+   388→                if (var3.field1122 >= 0) {
+   389→                        this.field1206 = new int[this.field1199];
+   390→                }
+   391→                if (var3.field1123 >= 0) {
+   392→                        this.field1207 = new int[this.field1199];
+   393→                } else {
+   394→                        this.field1210 = -var3.field1123 - 1;
+   395→                }
+   396→                if (var3.field1124 >= 0) {
+   397→                        this.field1208 = new int[this.field1199];
+   398→                }
+   399→                if (var3.field1125 >= 0) {
+   400→                        this.field1224 = new int[this.field1199];
+   401→                }
+   402→                this.faceColour = new int[this.field1199];
+   403→                Packet var4 = new Packet(var3.field1110);
+   404→                var4.pos = var3.field1114;
+   405→                Packet var5 = new Packet(var3.field1110);
+   406→                var5.pos = var3.field1115;
+   407→                Packet var6 = new Packet(var3.field1110);
+   408→                var6.pos = var3.field1116;
+   409→                Packet var7 = new Packet(var3.field1110);
+   410→                var7.pos = var3.field1117;
+   411→                Packet var8 = new Packet(var3.field1110);
+   412→                var8.pos = var3.field1118;
+   413→                int var9 = 0;
+   414→                int var10 = 0;
+   415→                int var11 = 0;
+   416→                for (int var12 = 0; var12 < this.field1195; var12++) {
+   417→                        int var24 = var4.g1();
+   418→                        int var25 = 0;
+   419→                        if ((var24 & 0x1) != 0) {
+   420→                                var25 = var5.gsmart();
+   421→                        }
+   422→                        int var26 = 0;
+   423→                        if ((var24 & 0x2) != 0) {
+   424→                                var26 = var6.gsmart();
+   425→                        }
+   426→                        int var27 = 0;
+   427→                        if ((var24 & 0x4) != 0) {
+   428→                                var27 = var7.gsmart();
+   429→                        }
+   430→                        this.field1196[var12] = var9 + var25;
+   431→                        this.field1197[var12] = var10 + var26;
+   432→                        this.field1198[var12] = var11 + var27;
+   433→                        var9 = this.field1196[var12];
+   434→                        var10 = this.field1197[var12];
+   435→                        var11 = this.field1198[var12];
+   436→                        if (this.field1223 != null) {
+   437→                                this.field1223[var12] = var8.g1();
+   438→                        }
+   439→                }
+   440→                var4.pos = var3.field1121;
+   441→                var5.pos = var3.field1122;
+   442→                var6.pos = var3.field1123;
+   443→                var7.pos = var3.field1124;
+   444→                var8.pos = var3.field1125;
+   445→                for (int var13 = 0; var13 < this.field1199; var13++) {
+   446→                        this.faceColour[var13] = var4.g2();
+   447→                        if (this.field1206 != null) {
+   448→                                this.field1206[var13] = var5.g1();
+   449→                        }
+   450→                        if (this.field1207 != null) {
+   451→                                this.field1207[var13] = var6.g1();
+   452→                        }
+   453→                        if (this.field1208 != null) {
+   454→                                this.field1208[var13] = var7.g1();
+   455→                        }
+   456→                        if (this.field1224 != null) {
+   457→                                this.field1224[var13] = var8.g1();
+   458→                        }
+   459→                }
+   460→                var4.pos = var3.field1119;
+   461→                var5.pos = var3.field1120;
+   462→                int var14 = 0;
+   463→                int var15 = 0;
+   464→                int var16 = 0;
+   465→                int var17 = 0;
+   466→                for (int var18 = 0; var18 < this.field1199; var18++) {
+   467→                        int var20 = var5.g1();
+   468→                        if (var20 == 1) {
+   469→                                var14 = var4.gsmart() + var17;
+   470→                                var15 = var4.gsmart() + var14;
+   471→                                var16 = var4.gsmart() + var15;
+   472→                                var17 = var16;
+   473→                                this.field1200[var18] = var14;
+   474→                                this.field1201[var18] = var15;
+   475→                                this.field1202[var18] = var16;
+   476→                        }
+   477→                        if (var20 == 2) {
+   478→                                var14 = var14;
+   479→                                var15 = var16;
+   480→                                var16 = var4.gsmart() + var17;
+   481→                                var17 = var16;
+   482→                                this.field1200[var18] = var14;
+   483→                                this.field1201[var18] = var15;
+   484→                                this.field1202[var18] = var16;
+   485→                        }
+   486→                        if (var20 == 3) {
+   487→                                var14 = var16;
+   488→                                var15 = var15;
+   489→                                var16 = var4.gsmart() + var17;
+   490→                                var17 = var16;
+   491→                                this.field1200[var18] = var14;
+   492→                                this.field1201[var18] = var15;
+   493→                                this.field1202[var18] = var16;
+   494→                        }
+   495→                        if (var20 == 4) {
+   496→                                int var23 = var14;
+   497→                                var14 = var15;
+   498→                                var15 = var23;
+   499→                                var16 = var4.gsmart() + var17;
+   500→                                var17 = var16;
+   501→                                this.field1200[var18] = var14;
+   502→                                this.field1201[var18] = var23;
+   503→                                this.field1202[var18] = var16;
+   504→                        }
+   505→                }
+   506→                var4.pos = var3.field1126;
+   507→                for (int var19 = 0; var19 < this.field1211; var19++) {
+   508→                        this.field1212[var19] = var4.g2();
+   509→                        this.field1213[var19] = var4.g2();
+   510→                        this.field1214[var19] = var4.g2();
+   511→                }
+   512→        }
+   513→
+   514→        public Model(int arg0, Model[] arg1, byte arg2) {
+   515→                field1189++;
+   516→                boolean var4 = false;
+   517→                boolean var5 = false;
+   518→                boolean var6 = false;
+   519→                boolean var7 = false;
+   520→                this.field1195 = 0;
+   521→                this.field1199 = 0;
+   522→                this.field1211 = 0;
+   523→                this.field1210 = -1;
+   524→                for (int var8 = 0; var8 < arg0; var8++) {
+   525→                        Model var15 = arg1[var8];
+   526→                        if (var15 != null) {
+   527→                                this.field1195 += var15.field1195;
+   528→                                this.field1199 += var15.field1199;
+   529→                                this.field1211 += var15.field1211;
+   530→                                var4 |= var15.field1206 != null;
+   531→                                if (var15.field1207 == null) {
+   532→                                        if (this.field1210 == -1) {
+   533→                                                this.field1210 = var15.field1210;
+   534→                                        }
+   535→                                        if (this.field1210 != var15.field1210) {
+   536→                                                var5 = true;
+   537→                                        }
+   538→                                } else {
+   539→                                        var5 = true;
+   540→                                }
+   541→                                var6 |= var15.field1208 != null;
+   542→                                var7 |= var15.field1224 != null;
+   543→                        }
+   544→                }
+   545→                this.field1196 = new int[this.field1195];
+   546→                this.field1197 = new int[this.field1195];
+   547→                this.field1198 = new int[this.field1195];
+   548→                this.field1223 = new int[this.field1195];
+   549→                this.field1200 = new int[this.field1199];
+   550→                this.field1201 = new int[this.field1199];
+   551→                this.field1202 = new int[this.field1199];
+   552→                this.field1212 = new int[this.field1211];
+   553→                this.field1213 = new int[this.field1211];
+   554→                this.field1214 = new int[this.field1211];
+   555→                if (var4) {
+   556→                        this.field1206 = new int[this.field1199];
+   557→                }
+   558→                if (var5) {
+   559→                        this.field1207 = new int[this.field1199];
+   560→                }
+   561→                if (var6) {
+   562→                        this.field1208 = new int[this.field1199];
+   563→                }
+   564→                if (var7) {
+   565→                        this.field1224 = new int[this.field1199];
+   566→                }
+   567→                this.faceColour = new int[this.field1199];
+   568→                this.field1195 = 0;
+   569→                this.field1199 = 0;
+   570→                this.field1211 = 0;
+   571→                int var9 = 0;
+   572→                for (int var10 = 0; var10 < arg0; var10++) {
+   573→                        Model var11 = arg1[var10];
+   574→                        if (var11 != null) {
+   575→                                for (int var12 = 0; var12 < var11.field1199; var12++) {
+   576→                                        if (var4) {
+   577→                                                if (var11.field1206 == null) {
+   578→                                                        this.field1206[this.field1199] = 0;
+   579→                                                } else {
+   580→                                                        int var14 = var11.field1206[var12];
+   581→                                                        if ((var14 & 0x2) == 2) {
+   582→                                                                var14 += var9 << 2;
+   583→                                                        }
+   584→                                                        this.field1206[this.field1199] = var14;
+   585→                                                }
+   586→                                        }
+   587→                                        if (var5) {
+   588→                                                if (var11.field1207 == null) {
+   589→                                                        this.field1207[this.field1199] = var11.field1210;
+   590→                                                } else {
+   591→                                                        this.field1207[this.field1199] = var11.field1207[var12];
+   592→                                                }
+   593→                                        }
+   594→                                        if (var6) {
+   595→                                                if (var11.field1208 == null) {
+   596→                                                        this.field1208[this.field1199] = 0;
+   597→                                                } else {
+   598→                                                        this.field1208[this.field1199] = var11.field1208[var12];
+   599→                                                }
+   600→                                        }
+   601→                                        if (var7 && var11.field1224 != null) {
+   602→                                                this.field1224[this.field1199] = var11.field1224[var12];
+   603→                                        }
+   604→                                        this.faceColour[this.field1199] = var11.faceColour[var12];
+   605→                                        this.field1200[this.field1199] = this.method362(var11, var11.field1200[var12]);
+   606→                                        this.field1201[this.field1199] = this.method362(var11, var11.field1201[var12]);
+   607→                                        this.field1202[this.field1199] = this.method362(var11, var11.field1202[var12]);
+   608→                                        this.field1199++;
+   609→                                }
+   610→                                for (int var13 = 0; var13 < var11.field1211; var13++) {
+   611→                                        this.field1212[this.field1211] = this.method362(var11, var11.field1212[var13]);
+   612→                                        this.field1213[this.field1211] = this.method362(var11, var11.field1213[var13]);
+   613→                                        this.field1214[this.field1211] = this.method362(var11, var11.field1214[var13]);
+   614→                                        this.field1211++;
+   615→                                }
+   616→                                var9 += var11.field1211;
+   617→                        }
+   618→                }
+   619→        }
+   620→
+   621→        public Model(int arg0, boolean arg1, int arg2, Model[] arg3) {
+   622→                field1189++;
+   623→                boolean var5 = false;
+   624→                boolean var6 = false;
+   625→                boolean var7 = false;
+   626→                boolean var8 = false;
+   627→                this.field1195 = 0;
+   628→                this.field1199 = 0;
+   629→                this.field1211 = 0;
+   630→                this.field1210 = -1;
+   631→                for (int var9 = 0; var9 < arg0; var9++) {
+   632→                        Model var18 = arg3[var9];
+   633→                        if (var18 != null) {
+   634→                                this.field1195 += var18.field1195;
+   635→                                this.field1199 += var18.field1199;
+   636→                                this.field1211 += var18.field1211;
+   637→                                var5 |= var18.field1206 != null;
+   638→                                if (var18.field1207 == null) {
+   639→                                        if (this.field1210 == -1) {
+   640→                                                this.field1210 = var18.field1210;
+   641→                                        }
+   642→                                        if (this.field1210 != var18.field1210) {
+   643→                                                var6 = true;
+   644→                                        }
+   645→                                } else {
+   646→                                        var6 = true;
+   647→                                }
+   648→                                var7 |= var18.field1208 != null;
+   649→                                var8 |= var18.faceColour != null;
+   650→                        }
+   651→                }
+   652→                this.field1196 = new int[this.field1195];
+   653→                this.field1197 = new int[this.field1195];
+   654→                this.field1198 = new int[this.field1195];
+   655→                this.field1200 = new int[this.field1199];
+   656→                this.field1201 = new int[this.field1199];
+   657→                this.field1202 = new int[this.field1199];
+   658→                this.field1203 = new int[this.field1199];
+   659→                this.field1204 = new int[this.field1199];
+   660→                this.field1205 = new int[this.field1199];
+   661→                this.field1212 = new int[this.field1211];
+   662→                this.field1213 = new int[this.field1211];
+   663→                this.field1214 = new int[this.field1211];
+   664→                if (var5) {
+   665→                        this.field1206 = new int[this.field1199];
+   666→                }
+   667→                if (var6) {
+   668→                        this.field1207 = new int[this.field1199];
+   669→                }
+   670→                if (var7) {
+   671→                        this.field1208 = new int[this.field1199];
+   672→                }
+   673→                if (var8) {
+   674→                        this.faceColour = new int[this.field1199];
+   675→                }
+   676→                this.field1195 = 0;
+   677→                if (arg2 != 0) {
+   678→                        throw new NullPointerException();
+   679→                }
+   680→                this.field1199 = 0;
+   681→                this.field1211 = 0;
+   682→                int var10 = 0;
+   683→                for (int var11 = 0; var11 < arg0; var11++) {
+   684→                        Model var12 = arg3[var11];
+   685→                        if (var12 != null) {
+   686→                                int var13 = this.field1195;
+   687→                                for (int var14 = 0; var14 < var12.field1195; var14++) {
+   688→                                        this.field1196[this.field1195] = var12.field1196[var14];
+   689→                                        this.field1197[this.field1195] = var12.field1197[var14];
+   690→                                        this.field1198[this.field1195] = var12.field1198[var14];
+   691→                                        this.field1195++;
+   692→                                }
+   693→                                for (int var15 = 0; var15 < var12.field1199; var15++) {
+   694→                                        this.field1200[this.field1199] = var12.field1200[var15] + var13;
+   695→                                        this.field1201[this.field1199] = var12.field1201[var15] + var13;
+   696→                                        this.field1202[this.field1199] = var12.field1202[var15] + var13;
+   697→                                        this.field1203[this.field1199] = var12.field1203[var15];
+   698→                                        this.field1204[this.field1199] = var12.field1204[var15];
+   699→                                        this.field1205[this.field1199] = var12.field1205[var15];
+   700→                                        if (var5) {
+   701→                                                if (var12.field1206 == null) {
+   702→                                                        this.field1206[this.field1199] = 0;
+   703→                                                } else {
+   704→                                                        int var17 = var12.field1206[var15];
+   705→                                                        if ((var17 & 0x2) == 2) {
+   706→                                                                var17 += var10 << 2;
+   707→                                                        }
+   708→                                                        this.field1206[this.field1199] = var17;
+   709→                                                }
+   710→                                        }
+   711→                                        if (var6) {
+   712→                                                if (var12.field1207 == null) {
+   713→                                                        this.field1207[this.field1199] = var12.field1210;
+   714→                                                } else {
+   715→                                                        this.field1207[this.field1199] = var12.field1207[var15];
+   716→                                                }
+   717→                                        }
+   718→                                        if (var7) {
+   719→                                                if (var12.field1208 == null) {
+   720→                                                        this.field1208[this.field1199] = 0;
+   721→                                                } else {
+   722→                                                        this.field1208[this.field1199] = var12.field1208[var15];
+   723→                                                }
+   724→                                        }
+   725→                                        if (var8 && var12.faceColour != null) {
+   726→                                                this.faceColour[this.field1199] = var12.faceColour[var15];
+   727→                                        }
+   728→                                        this.field1199++;
+   729→                                }
+   730→                                for (int var16 = 0; var16 < var12.field1211; var16++) {
+   731→                                        this.field1212[this.field1211] = var12.field1212[var16] + var13;
+   732→                                        this.field1213[this.field1211] = var12.field1213[var16] + var13;
+   733→                                        this.field1214[this.field1211] = var12.field1214[var16] + var13;
+   734→                                        this.field1211++;
+   735→                                }
+   736→                                var10 += var12.field1211;
+   737→                        }
+   738→                }
+   739→                this.method363();
+   740→        }
+   741→
+   742→        public Model(boolean arg0, boolean arg1, boolean arg2, Model arg3, boolean arg4) {
+   743→                field1189++;
+   744→                this.field1195 = arg3.field1195;
+   745→                this.field1199 = arg3.field1199;
+   746→                this.field1211 = arg3.field1211;
+   747→                if (arg0) {
+   748→                        this.field1196 = arg3.field1196;
+   749→                        this.field1197 = arg3.field1197;
+   750→                        this.field1198 = arg3.field1198;
+   751→                } else {
+   752→                        this.field1196 = new int[this.field1195];
+   753→                        this.field1197 = new int[this.field1195];
+   754→                        this.field1198 = new int[this.field1195];
+   755→                        for (int var6 = 0; var6 < this.field1195; var6++) {
+   756→                                this.field1196[var6] = arg3.field1196[var6];
+   757→                                this.field1197[var6] = arg3.field1197[var6];
+   758→                                this.field1198[var6] = arg3.field1198[var6];
+   759→                        }
+   760→                }
+   761→                if (arg2) {
+   762→                        this.faceColour = arg3.faceColour;
+   763→                } else {
+   764→                        this.faceColour = new int[this.field1199];
+   765→                        for (int var7 = 0; var7 < this.field1199; var7++) {
+   766→                                this.faceColour[var7] = arg3.faceColour[var7];
+   767→                        }
+   768→                }
+   769→                if (arg4) {
+   770→                        this.field1208 = arg3.field1208;
+   771→                } else {
+   772→                        this.field1208 = new int[this.field1199];
+   773→                        if (arg3.field1208 == null) {
+   774→                                for (int var8 = 0; var8 < this.field1199; var8++) {
+   775→                                        this.field1208[var8] = 0;
+   776→                                }
+   777→                        } else {
+   778→                                for (int var9 = 0; var9 < this.field1199; var9++) {
+   779→                                        this.field1208[var9] = arg3.field1208[var9];
+   780→                                }
+   781→                        }
+   782→                }
+   783→                this.field1223 = arg3.field1223;
+   784→                this.field1224 = arg3.field1224;
+   785→                this.field1206 = arg3.field1206;
+   786→                this.field1200 = arg3.field1200;
+   787→                this.field1201 = arg3.field1201;
+   788→                this.field1202 = arg3.field1202;
+   789→                this.field1207 = arg3.field1207;
+   790→                this.field1210 = arg3.field1210;
+   791→                this.field1212 = arg3.field1212;
+   792→                this.field1213 = arg3.field1213;
+   793→                this.field1214 = arg3.field1214;
+   794→        }
+   795→
+   796→        public Model(boolean arg0, boolean arg1, int arg2, Model arg3) {
+   797→                field1189++;
+   798→                this.field1195 = arg3.field1195;
+   799→                this.field1199 = arg3.field1199;
+   800→                this.field1211 = arg3.field1211;
+   801→                if (arg0) {
+   802→                        this.field1197 = new int[this.field1195];
+   803→                        for (int var5 = 0; var5 < this.field1195; var5++) {
+   804→                                this.field1197[var5] = arg3.field1197[var5];
+   805→                        }
+   806→                } else {
+   807→                        this.field1197 = arg3.field1197;
+   808→                }
+   809→                if (arg1) {
+   810→                        this.field1203 = new int[this.field1199];
+   811→                        this.field1204 = new int[this.field1199];
+   812→                        this.field1205 = new int[this.field1199];
+   813→                        for (int var6 = 0; var6 < this.field1199; var6++) {
+   814→                                this.field1203[var6] = arg3.field1203[var6];
+   815→                                this.field1204[var6] = arg3.field1204[var6];
+   816→                                this.field1205[var6] = arg3.field1205[var6];
+   817→                        }
+   818→                        this.field1206 = new int[this.field1199];
+   819→                        if (arg3.field1206 == null) {
+   820→                                for (int var7 = 0; var7 < this.field1199; var7++) {
+   821→                                        this.field1206[var7] = 0;
+   822→                                }
+   823→                        } else {
+   824→                                for (int var8 = 0; var8 < this.field1199; var8++) {
+   825→                                        this.field1206[var8] = arg3.field1206[var8];
+   826→                                }
+   827→                        }
+   828→                        super.field1708 = new VertexNormal[this.field1195];
+   829→                        for (int var9 = 0; var9 < this.field1195; var9++) {
+   830→                                VertexNormal var10 = super.field1708[var9] = new VertexNormal();
+   831→                                VertexNormal var11 = arg3.field1708[var9];
+   832→                                var10.field1496 = var11.field1496;
+   833→                                var10.field1497 = var11.field1497;
+   834→                                var10.field1498 = var11.field1498;
+   835→                                var10.field1499 = var11.field1499;
+   836→                        }
+   837→                        this.field1228 = arg3.field1228;
+   838→                } else {
+   839→                        this.field1203 = arg3.field1203;
+   840→                        this.field1204 = arg3.field1204;
+   841→                        this.field1205 = arg3.field1205;
+   842→                        this.field1206 = arg3.field1206;
+   843→                }
+   844→                this.field1196 = arg3.field1196;
+   845→                this.field1198 = arg3.field1198;
+   846→                this.faceColour = arg3.faceColour;
+   847→                this.field1208 = arg3.field1208;
+   848→                this.field1207 = arg3.field1207;
+   849→                this.field1210 = arg3.field1210;
+   850→                this.field1200 = arg3.field1200;
+   851→                this.field1201 = arg3.field1201;
+   852→                this.field1202 = arg3.field1202;
+   853→                this.field1212 = arg3.field1212;
+   854→                this.field1213 = arg3.field1213;
+   855→                this.field1214 = arg3.field1214;
+   856→                super.field1709 = arg3.field1709;
+   857→                this.field1219 = arg3.field1219;
+   858→                this.field1218 = arg3.field1218;
+   859→                this.field1221 = arg3.field1221;
+   860→                this.field1220 = arg3.field1220;
+   861→                this.field1216 = arg3.field1216;
+   862→                this.field1217 = arg3.field1217;
+   863→                this.field1215 = arg3.field1215;
+   864→        }
+   865→
+   866→        @ObfuscatedName("LZYQDKJV.a(ZLLZYQDKJV;I)V")
+   867→        public void method361(boolean arg0, Model arg1) {
+   868→                this.field1195 = arg1.field1195;
+   869→                this.field1199 = arg1.field1199;
+   870→                this.field1211 = arg1.field1211;
+   871→                if (field1191.length < this.field1195) {
+   872→                        field1191 = new int[this.field1195 + 100];
+   873→                        field1192 = new int[this.field1195 + 100];
+   874→                        field1193 = new int[this.field1195 + 100];
+   875→                }
+   876→                this.field1196 = field1191;
+   877→                this.field1197 = field1192;
+   878→                this.field1198 = field1193;
+   879→                for (int var4 = 0; var4 < this.field1195; var4++) {
+   880→                        this.field1196[var4] = arg1.field1196[var4];
+   881→                        this.field1197[var4] = arg1.field1197[var4];
+   882→                        this.field1198[var4] = arg1.field1198[var4];
+   883→                }
+   884→                if (arg0) {
+   885→                        this.field1208 = arg1.field1208;
+   886→                } else {
+   887→                        if (field1194.length < this.field1199) {
+   888→                                field1194 = new int[this.field1199 + 100];
+   889→                        }
+   890→                        this.field1208 = field1194;
+   891→                        if (arg1.field1208 == null) {
+   892→                                for (int var5 = 0; var5 < this.field1199; var5++) {
+   893→                                        this.field1208[var5] = 0;
+   894→                                }
+   895→                        } else {
+   896→                                for (int var6 = 0; var6 < this.field1199; var6++) {
+   897→                                        this.field1208[var6] = arg1.field1208[var6];
+   898→                                }
+   899→                        }
+   900→                }
+   901→                this.field1206 = arg1.field1206;
+   902→                this.faceColour = arg1.faceColour;
+   903→                this.field1207 = arg1.field1207;
+   904→                this.field1210 = arg1.field1210;
+   905→                this.field1226 = arg1.field1226;
+   906→                this.field1225 = arg1.field1225;
+   907→                this.field1200 = arg1.field1200;
+   908→                this.field1201 = arg1.field1201;
+   909→                this.field1202 = arg1.field1202;
+   910→                this.field1203 = arg1.field1203;
+   911→                this.field1204 = arg1.field1204;
+   912→                this.field1205 = arg1.field1205;
+   913→                this.field1212 = arg1.field1212;
+   914→                this.field1213 = arg1.field1213;
+   915→                this.field1214 = arg1.field1214;
+   916→        }
+   917→
+   918→        @ObfuscatedName("LZYQDKJV.a(LLZYQDKJV;I)I")
+   919→        public int method362(Model arg0, int arg1) {
+   920→                int var3 = -1;
+   921→                int var4 = arg0.field1196[arg1];
+   922→                int var5 = arg0.field1197[arg1];
+   923→                int var6 = arg0.field1198[arg1];
+   924→                for (int var7 = 0; var7 < this.field1195; var7++) {
+   925→                        if (this.field1196[var7] == var4 && this.field1197[var7] == var5 && this.field1198[var7] == var6) {
+   926→                                var3 = var7;
+   927→                                break;
+   928→                        }
+   929→                }
+   930→                if (var3 == -1) {
+   931→                        this.field1196[this.field1195] = var4;
+   932→                        this.field1197[this.field1195] = var5;
+   933→                        this.field1198[this.field1195] = var6;
+   934→                        if (arg0.field1223 != null) {
+   935→                                this.field1223[this.field1195] = arg0.field1223[arg1];
+   936→                        }
+   937→                        var3 = this.field1195++;
+   938→                }
+   939→                return var3;
+   940→        }
+   941→
+   942→        @ObfuscatedName("LZYQDKJV.c(I)V")
+   943→        public void method363() {
+   944→                super.field1709 = 0;
+   945→                this.field1218 = 0;
+   946→                this.field1219 = 0;
+   947→                for (int var2 = 0; var2 < this.field1195; var2++) {
+   948→                        int var4 = this.field1196[var2];
+   949→                        int var5 = this.field1197[var2];
+   950→                        int var6 = this.field1198[var2];
+   951→                        if (-var5 > super.field1709) {
+   952→                                super.field1709 = -var5;
+   953→                        }
+   954→                        if (var5 > this.field1219) {
+   955→                                this.field1219 = var5;
+   956→                        }
+   957→                        int var7 = var4 * var4 + var6 * var6;
+   958→                        if (var7 > this.field1218) {
+   959→                                this.field1218 = var7;
+   960→                        }
+   961→                }
+   962→                this.field1218 = (int) (Math.sqrt((double) this.field1218) + 0.99D);
+   963→                this.field1221 = (int) (Math.sqrt((double) (super.field1709 * super.field1709 + this.field1218 * this.field1218)) + 0.99D);
+   964→                this.field1220 = this.field1221 + (int) (Math.sqrt((double) (this.field1219 * this.field1219 + this.field1218 * this.field1218)) + 0.99D);
+   965→        }
+   966→
+   967→        @ObfuscatedName("LZYQDKJV.d(I)V")
+   968→        public void method364() {
+   969→                super.field1709 = 0;
+   970→                this.field1219 = 0;
+   971→                for (int var2 = 0; var2 < this.field1195; var2++) {
+   972→                        int var3 = this.field1197[var2];
+   973→                        if (-var3 > super.field1709) {
+   974→                                super.field1709 = -var3;
+   975→                        }
+   976→                        if (var3 > this.field1219) {
+   977→                                this.field1219 = var3;
+   978→                        }
+   979→                }
+   980→                this.field1221 = (int) (Math.sqrt((double) (super.field1709 * super.field1709 + this.field1218 * this.field1218)) + 0.99D);
+   981→                this.field1220 = this.field1221 + (int) (Math.sqrt((double) (this.field1219 * this.field1219 + this.field1218 * this.field1218)) + 0.99D);
+   982→        }
+   983→
+   984→        @ObfuscatedName("LZYQDKJV.e(I)V")
+   985→        public void method365() {
+   986→                super.field1709 = 0;
+   987→                this.field1218 = 0;
+   988→                this.field1219 = 0;
+   989→                int var2 = 32767;
+   990→                int var3 = -32767;
+   991→                int var4 = -32767;
+   992→                int var5 = 32767;
+   993→                for (int var6 = 0; var6 < this.field1195; var6++) {
+   994→                        int var7 = this.field1196[var6];
+   995→                        int var8 = this.field1197[var6];
+   996→                        int var9 = this.field1198[var6];
+   997→                        if (var7 < var2) {
+   998→                                var2 = var7;
+   999→                        }
+  1000→                        if (var7 > var3) {
+  1001→                                var3 = var7;
+  1002→                        }
+  1003→                        if (var9 < var5) {
+  1004→                                var5 = var9;
+  1005→                        }
+  1006→                        if (var9 > var4) {
+  1007→                                var4 = var9;
+  1008→                        }
+  1009→                        if (-var8 > super.field1709) {
+  1010→                                super.field1709 = -var8;
+  1011→                        }
+  1012→                        if (var8 > this.field1219) {
+  1013→                                this.field1219 = var8;
+  1014→                        }
+  1015→                        int var10 = var7 * var7 + var9 * var9;
+  1016→                        if (var10 > this.field1218) {
+  1017→                                this.field1218 = var10;
+  1018→                        }
+  1019→                }
+  1020→                this.field1218 = (int) Math.sqrt((double) this.field1218);
+  1021→                this.field1221 = (int) Math.sqrt((double) (super.field1709 * super.field1709 + this.field1218 * this.field1218));
+  1022→                this.field1220 = this.field1221 + (int) Math.sqrt((double) (this.field1219 * this.field1219 + this.field1218 * this.field1218));
+  1023→                this.field1216 = (var2 << 16) + (var3 & 0xFFFF);
+  1024→                this.field1217 = (var4 << 16) + (var5 & 0xFFFF);
+  1025→        }
+  1026→
+  1027→        @ObfuscatedName("LZYQDKJV.f(I)V")
+  1028→        public void createLabelReferences() {
+  1029→                int var10002;
+  1030→                if (this.field1223 != null) {
+  1031→                        int[] var2 = new int[256];
+  1032→                        int var3 = 0;
+  1033→                        for (int var4 = 0; var4 < this.field1195; var4++) {
+  1034→                                int var8 = this.field1223[var4];
+  1035→                                var10002 = var2[var8]++;
+  1036→                                if (var8 > var3) {
+  1037→                                        var3 = var8;
+  1038→                                }
+  1039→                        }
+  1040→                        this.field1225 = new int[var3 + 1][];
+  1041→                        for (int var5 = 0; var5 <= var3; var5++) {
+  1042→                                this.field1225[var5] = new int[var2[var5]];
+  1043→                                var2[var5] = 0;
+  1044→                        }
+  1045→                        int var6 = 0;
+  1046→                        while (var6 < this.field1195) {
+  1047→                                int var7 = this.field1223[var6];
+  1048→                                this.field1225[var7][var2[var7]++] = var6++;
+  1049→                        }
+  1050→                        this.field1223 = null;
+  1051→                }
+  1052→                if (this.field1224 == null) {
+  1053→                        return;
+  1054→                }
+  1055→                int[] var9 = new int[256];
+  1056→                int var10 = 0;
+  1057→                for (int var11 = 0; var11 < this.field1199; var11++) {
+  1058→                        int var15 = this.field1224[var11];
+  1059→                        var10002 = var9[var15]++;
+  1060→                        if (var15 > var10) {
+  1061→                                var10 = var15;
+  1062→                        }
+  1063→                }
+  1064→                this.field1226 = new int[var10 + 1][];
+  1065→                for (int var12 = 0; var12 <= var10; var12++) {
+  1066→                        this.field1226[var12] = new int[var9[var12]];
+  1067→                        var9[var12] = 0;
+  1068→                }
+  1069→                int var13 = 0;
+  1070→                while (var13 < this.field1199) {
+  1071→                        int var14 = this.field1224[var13];
+  1072→                        this.field1226[var14][var9[var14]++] = var13++;
+  1073→                }
+  1074→                this.field1224 = null;
+  1075→        }
+  1076→
+  1077→        @ObfuscatedName("LZYQDKJV.a(IB)V")
+  1078→        public void applyTransform(int arg0) {
+  1079→                if (this.field1225 == null || arg0 == -1) {
+  1080→                        return;
+  1081→                }
+  1082→                AnimFrame var3 = AnimFrame.get(arg0);
+  1083→                if (var3 == null) {
+  1084→                        return;
+  1085→                }
+  1086→                AnimBase var4 = var3.base;
+  1087→                boolean var5 = false;
+  1088→                field1249 = 0;
+  1089→                field1250 = 0;
+  1090→                field1251 = 0;
+  1091→                for (int var6 = 0; var6 < var3.size; var6++) {
+  1092→                        int var7 = var3.ti[var6];
+  1093→                        this.method369(var4.types[var7], var4.labels[var7], var3.tx[var6], var3.ty[var6], var3.tz[var6]);
+  1094→                }
+  1095→        }
+  1096→
+  1097→        @ObfuscatedName("LZYQDKJV.a(III[I)V")
+  1098→        public void method368(int arg0, int arg2, int[] arg3) {
+  1099→                if (arg2 == -1) {
+  1100→                        return;
+  1101→                }
+  1102→                if (arg3 == null || arg0 == -1) {
+  1103→                        this.applyTransform(arg2);
+  1104→                        return;
+  1105→                }
+  1106→                AnimFrame var5 = AnimFrame.get(arg2);
+  1107→                if (var5 == null) {
+  1108→                        return;
+  1109→                }
+  1110→                AnimFrame var6 = AnimFrame.get(arg0);
+  1111→                if (var6 == null) {
+  1112→                        this.applyTransform(arg2);
+  1113→                        return;
+  1114→                }
+  1115→                AnimBase var7 = var5.base;
+  1116→                field1249 = 0;
+  1117→                field1250 = 0;
+  1118→                field1251 = 0;
+  1119→                byte var8 = 0;
+  1120→                int var16 = var8 + 1;
+  1121→                int var9 = arg3[var8];
+  1122→                for (int var10 = 0; var10 < var5.size; var10++) {
+  1123→                        int var15 = var5.ti[var10];
+  1124→                        while (var15 > var9) {
+  1125→                                var9 = arg3[var16++];
+  1126→                        }
+  1127→                        if (var9 != var15 || var7.types[var15] == 0) {
+  1128→                                this.method369(var7.types[var15], var7.labels[var15], var5.tx[var10], var5.ty[var10], var5.tz[var10]);
+  1129→                        }
+  1130→                }
+  1131→                field1249 = 0;
+  1132→                field1250 = 0;
+  1133→                field1251 = 0;
+  1134→                byte var11 = 0;
+  1135→                int var17 = var11 + 1;
+  1136→                int var12 = arg3[var11];
+  1137→                for (int var13 = 0; var13 < var6.size; var13++) {
+  1138→                        int var14 = var6.ti[var13];
+  1139→                        while (var14 > var12) {
+  1140→                                var12 = arg3[var17++];
+  1141→                        }
+  1142→                        if (var12 == var14 || var7.types[var14] == 0) {
+  1143→                                this.method369(var7.types[var14], var7.labels[var14], var6.tx[var13], var6.ty[var13], var6.tz[var13]);
+  1144→                        }
+  1145→                }
+  1146→        }
+  1147→
+  1148→        @ObfuscatedName("LZYQDKJV.a(I[IIII)V")
+  1149→        public void method369(int arg0, int[] arg1, int arg2, int arg3, int arg4) {
+  1150→                int var6 = arg1.length;
+  1151→                if (arg0 == 0) {
+  1152→                        int var7 = 0;
+  1153→                        field1249 = 0;
+  1154→                        field1250 = 0;
+  1155→                        field1251 = 0;
+  1156→                        for (int var8 = 0; var8 < var6; var8++) {
+  1157→                                int var9 = arg1[var8];
+  1158→                                if (var9 < this.field1225.length) {
+  1159→                                        int[] var10 = this.field1225[var9];
+  1160→                                        for (int var11 = 0; var11 < var10.length; var11++) {
+  1161→                                                int var12 = var10[var11];
+  1162→                                                field1249 += this.field1196[var12];
+  1163→                                                field1250 += this.field1197[var12];
+  1164→                                                field1251 += this.field1198[var12];
+  1165→                                                var7++;
+  1166→                                        }
+  1167→                                }
+  1168→                        }
+  1169→                        if (var7 > 0) {
+  1170→                                field1249 = field1249 / var7 + arg2;
+  1171→                                field1250 = field1250 / var7 + arg3;
+  1172→                                field1251 = field1251 / var7 + arg4;
+  1173→                        } else {
+  1174→                                field1249 = arg2;
+  1175→                                field1250 = arg3;
+  1176→                                field1251 = arg4;
+  1177→                        }
+  1178→                } else if (arg0 == 1) {
+  1179→                        for (int var13 = 0; var13 < var6; var13++) {
+  1180→                                int var14 = arg1[var13];
+  1181→                                if (var14 < this.field1225.length) {
+  1182→                                        int[] var15 = this.field1225[var14];
+  1183→                                        for (int var16 = 0; var16 < var15.length; var16++) {
+  1184→                                                int var17 = var15[var16];
+  1185→                                                this.field1196[var17] += arg2;
+  1186→                                                this.field1197[var17] += arg3;
+  1187→                                                this.field1198[var17] += arg4;
+  1188→                                        }
+  1189→                                }
+  1190→                        }
+  1191→                } else if (arg0 == 2) {
+  1192→                        for (int var18 = 0; var18 < var6; var18++) {
+  1193→                                int var19 = arg1[var18];
+  1194→                                if (var19 < this.field1225.length) {
+  1195→                                        int[] var20 = this.field1225[var19];
+  1196→                                        for (int var21 = 0; var21 < var20.length; var21++) {
+  1197→                                                int var22 = var20[var21];
+  1198→                                                this.field1196[var22] -= field1249;
+  1199→                                                this.field1197[var22] -= field1250;
+  1200→                                                this.field1198[var22] -= field1251;
+  1201→                                                int var23 = (arg2 & 0xFF) * 8;
+  1202→                                                int var24 = (arg3 & 0xFF) * 8;
+  1203→                                                int var25 = (arg4 & 0xFF) * 8;
+  1204→                                                if (var25 != 0) {
+  1205→                                                        int var26 = sinTable[var25];
+  1206→                                                        int var27 = cosTable[var25];
+  1207→                                                        int var28 = this.field1197[var22] * var26 + this.field1196[var22] * var27 >> 16;
+  1208→                                                        this.field1197[var22] = this.field1197[var22] * var27 - this.field1196[var22] * var26 >> 16;
+  1209→                                                        this.field1196[var22] = var28;
+  1210→                                                }
+  1211→                                                if (var23 != 0) {
+  1212→                                                        int var29 = sinTable[var23];
+  1213→                                                        int var30 = cosTable[var23];
+  1214→                                                        int var31 = this.field1197[var22] * var30 - this.field1198[var22] * var29 >> 16;
+  1215→                                                        this.field1198[var22] = this.field1198[var22] * var30 + this.field1197[var22] * var29 >> 16;
+  1216→                                                        this.field1197[var22] = var31;
+  1217→                                                }
+  1218→                                                if (var24 != 0) {
+  1219→                                                        int var32 = sinTable[var24];
+  1220→                                                        int var33 = cosTable[var24];
+  1221→                                                        int var34 = this.field1198[var22] * var32 + this.field1196[var22] * var33 >> 16;
+  1222→                                                        this.field1198[var22] = this.field1198[var22] * var33 - this.field1196[var22] * var32 >> 16;
+  1223→                                                        this.field1196[var22] = var34;
+  1224→                                                }
+  1225→                                                this.field1196[var22] += field1249;
+  1226→                                                this.field1197[var22] += field1250;
+  1227→                                                this.field1198[var22] += field1251;
+  1228→                                        }
+  1229→                                }
+  1230→                        }
+  1231→                } else if (arg0 == 3) {
+  1232→                        for (int var35 = 0; var35 < var6; var35++) {
+  1233→                                int var36 = arg1[var35];
+  1234→                                if (var36 < this.field1225.length) {
+  1235→                                        int[] var37 = this.field1225[var36];
+  1236→                                        for (int var38 = 0; var38 < var37.length; var38++) {
+  1237→                                                int var39 = var37[var38];
+  1238→                                                this.field1196[var39] -= field1249;
+  1239→                                                this.field1197[var39] -= field1250;
+  1240→                                                this.field1198[var39] -= field1251;
+  1241→                                                this.field1196[var39] = this.field1196[var39] * arg2 / 128;
+  1242→                                                this.field1197[var39] = this.field1197[var39] * arg3 / 128;
+  1243→                                                this.field1198[var39] = this.field1198[var39] * arg4 / 128;
+  1244→                                                this.field1196[var39] += field1249;
+  1245→                                                this.field1197[var39] += field1250;
+  1246→                                                this.field1198[var39] += field1251;
+  1247→                                        }
+  1248→                                }
+  1249→                        }
+  1250→                } else if (arg0 == 5 && (this.field1226 != null && this.field1208 != null)) {
+  1251→                        for (int var40 = 0; var40 < var6; var40++) {
+  1252→                                int var41 = arg1[var40];
+  1253→                                if (var41 < this.field1226.length) {
+  1254→                                        int[] var42 = this.field1226[var41];
+  1255→                                        for (int var43 = 0; var43 < var42.length; var43++) {
+  1256→                                                int var44 = var42[var43];
+  1257→                                                this.field1208[var44] += arg2 * 8;
+  1258→                                                if (this.field1208[var44] < 0) {
+  1259→                                                        this.field1208[var44] = 0;
+  1260→                                                }
+  1261→                                                if (this.field1208[var44] > 255) {
+  1262→                                                        this.field1208[var44] = 255;
+  1263→                                                }
+  1264→                                        }
+  1265→                                }
+  1266→                        }
+  1267→                }
+  1268→        }
+  1269→
+  1270→        @ObfuscatedName("LZYQDKJV.b(Z)V")
+  1271→        public void method370(boolean arg0) {
+  1272→                if (!arg0) {
+  1273→                        return;
+  1274→                }
+  1275→                for (int var2 = 0; var2 < this.field1195; var2++) {
+  1276→                        int var3 = this.field1196[var2];
+  1277→                        this.field1196[var2] = this.field1198[var2];
+  1278→                        this.field1198[var2] = -var3;
+  1279→                }
+  1280→        }
+  1281→
+  1282→        @ObfuscatedName("LZYQDKJV.b(II)V")
+  1283→        public void method371(int arg0) {
+  1284→                int var3 = sinTable[arg0];
+  1285→                int var4 = cosTable[arg0];
+  1286→                for (int var5 = 0; var5 < this.field1195; var5++) {
+  1287→                        int var7 = this.field1197[var5] * var4 - this.field1198[var5] * var3 >> 16;
+  1288→                        this.field1198[var5] = this.field1198[var5] * var4 + this.field1197[var5] * var3 >> 16;
+  1289→                        this.field1197[var5] = var7;
+  1290→                }
+  1291→        }
+  1292→
+  1293→        @ObfuscatedName("LZYQDKJV.a(IIZI)V")
+  1294→        public void method372(int arg0, int arg1, int arg3) {
+  1295→                for (int var5 = 0; var5 < this.field1195; var5++) {
+  1296→                        this.field1196[var5] += arg0;
+  1297→                        this.field1197[var5] += arg3;
+  1298→                        this.field1198[var5] += arg1;
+  1299→                }
+  1300→        }
+  1301→
+  1302→        @ObfuscatedName("LZYQDKJV.c(II)V")
+  1303→        public void method373(int arg0, int arg1) {
+  1304→                for (int var3 = 0; var3 < this.field1199; var3++) {
+  1305→                        if (this.faceColour[var3] == arg0) {
+  1306→                                this.faceColour[var3] = arg1;
+  1307→                        }
+  1308→                }
+  1309→        }
+  1310→
+  1311→        @ObfuscatedName("LZYQDKJV.g(I)V")
+  1312→        public void method374() {
+  1313→                for (int var3 = 0; var3 < this.field1195; var3++) {
+  1314→                        this.field1198[var3] = -this.field1198[var3];
+  1315→                }
+  1316→                for (int var4 = 0; var4 < this.field1199; var4++) {
+  1317→                        int var5 = this.field1200[var4];
+  1318→                        this.field1200[var4] = this.field1202[var4];
+  1319→                        this.field1202[var4] = var5;
+  1320→                }
+  1321→        }
+  1322→
+  1323→        @ObfuscatedName("LZYQDKJV.a(IIII)V")
+  1324→        public void method375(int arg0, int arg1, int arg3) {
+  1325→                for (int var5 = 0; var5 < this.field1195; var5++) {
+  1326→                        this.field1196[var5] = this.field1196[var5] * arg3 / 128;
+  1327→                        this.field1197[var5] = this.field1197[var5] * arg0 / 128;
+  1328→                        this.field1198[var5] = this.field1198[var5] * arg1 / 128;
+  1329→                }
+  1330→        }
+  1331→
+  1332→        @ObfuscatedName("LZYQDKJV.a(IIIIIZ)V")
+  1333→        public void calculateNormals(int ambient, int contrast, int arg2, int arg3, int arg4, boolean arg5) {
+  1334→                int var7 = (int) Math.sqrt((double) (arg4 * arg4 + arg2 * arg2 + arg3 * arg3));
+  1335→                int var8 = contrast * var7 >> 8;
+  1336→                if (this.field1203 == null) {
+  1337→                        this.field1203 = new int[this.field1199];
+  1338→                        this.field1204 = new int[this.field1199];
+  1339→                        this.field1205 = new int[this.field1199];
+  1340→                }
+  1341→                if (super.field1708 == null) {
+  1342→                        super.field1708 = new VertexNormal[this.field1195];
+  1343→                        for (int var9 = 0; var9 < this.field1195; var9++) {
+  1344→                                super.field1708[var9] = new VertexNormal();
+  1345→                        }
+  1346→                }
+  1347→                for (int var10 = 0; var10 < this.field1199; var10++) {
+  1348→                        int var14 = this.field1200[var10];
+  1349→                        int var15 = this.field1201[var10];
+  1350→                        int var16 = this.field1202[var10];
+  1351→                        int var17 = this.field1196[var15] - this.field1196[var14];
+  1352→                        int var18 = this.field1197[var15] - this.field1197[var14];
+  1353→                        int var19 = this.field1198[var15] - this.field1198[var14];
+  1354→                        int var20 = this.field1196[var16] - this.field1196[var14];
+  1355→                        int var21 = this.field1197[var16] - this.field1197[var14];
+  1356→                        int var22 = this.field1198[var16] - this.field1198[var14];
+  1357→                        int var23 = var18 * var22 - var19 * var21;
+  1358→                        int var24 = var19 * var20 - var17 * var22;
+  1359→                        int var25;
+  1360→                        for (var25 = var17 * var21 - var18 * var20; var23 > 8192 || var24 > 8192 || var25 > 8192 || var23 < -8192 || var24 < -8192 || var25 < -8192; var25 >>= 0x1) {
+  1361→                                var23 >>= 0x1;
+  1362→                                var24 >>= 0x1;
+  1363→                        }
+  1364→                        int var26 = (int) Math.sqrt((double) (var25 * var25 + var23 * var23 + var24 * var24));
+  1365→                        if (var26 <= 0) {
+  1366→                                var26 = 1;
+  1367→                        }
+  1368→                        int var27 = var23 * 256 / var26;
+  1369→                        int var28 = var24 * 256 / var26;
+  1370→                        int var29 = var25 * 256 / var26;
+  1371→                        if (this.field1206 == null || (this.field1206[var10] & 0x1) == 0) {
+  1372→                                VertexNormal var31 = super.field1708[var14];
+  1373→                                var31.field1496 += var27;
+  1374→                                var31.field1497 += var28;
+  1375→                                var31.field1498 += var29;
+  1376→                                var31.field1499++;
+  1377→                                VertexNormal var32 = super.field1708[var15];
+  1378→                                var32.field1496 += var27;
+  1379→                                var32.field1497 += var28;
+  1380→                                var32.field1498 += var29;
+  1381→                                var32.field1499++;
+  1382→                                VertexNormal var33 = super.field1708[var16];
+  1383→                                var33.field1496 += var27;
+  1384→                                var33.field1497 += var28;
+  1385→                                var33.field1498 += var29;
+  1386→                                var33.field1499++;
+  1387→                        } else {
+  1388→                                int var30 = (arg4 * var29 + arg2 * var27 + arg3 * var28) / (var8 / 2 + var8) + ambient;
+  1389→                                this.field1203[var10] = method379(this.faceColour[var10], var30, this.field1206[var10]);
+  1390→                        }
+  1391→                }
+  1392→                if (arg5) {
+  1393→                        this.method378(ambient, var8, arg2, arg3, arg4);
+  1394→                } else {
+  1395→                        this.field1228 = new VertexNormal[this.field1195];
+  1396→                        for (int var11 = 0; var11 < this.field1195; var11++) {
+  1397→                                VertexNormal var12 = super.field1708[var11];
+  1398→                                VertexNormal var13 = this.field1228[var11] = new VertexNormal();
+  1399→                                var13.field1496 = var12.field1496;
+  1400→                                var13.field1497 = var12.field1497;
+  1401→                                var13.field1498 = var12.field1498;
+  1402→                                var13.field1499 = var12.field1499;
+  1403→                        }
+  1404→                        this.field1215 = (ambient << 16) + (var8 & 0xFFFF);
+  1405→                }
+  1406→                if (arg5) {
+  1407→                        this.method363();
+  1408→                } else {
+  1409→                        this.method365();
+  1410→                }
+  1411→        }
+  1412→
+  1413→        @ObfuscatedName("LZYQDKJV.b(IIII)V")
+  1414→        public void method377(int arg0, int arg1, int arg3) {
+  1415→                int var5 = this.field1215 >> 16;
+  1416→                int var6 = this.field1215 << 16 >> 16;
+  1417→                this.method378(var5, var6, arg3, arg0, arg1);
+  1418→        }
+  1419→
+  1420→        @ObfuscatedName("LZYQDKJV.a(IIIII)V")
+  1421→        public void method378(int arg0, int arg1, int arg2, int arg3, int arg4) {
+  1422→                for (int var6 = 0; var6 < this.field1199; var6++) {
+  1423→                        int var8 = this.field1200[var6];
+  1424→                        int var9 = this.field1201[var6];
+  1425→                        int var10 = this.field1202[var6];
+  1426→                        if (this.field1206 == null) {
+  1427→                                int var11 = this.faceColour[var6];
+  1428→                                VertexNormal var12 = super.field1708[var8];
+  1429→                                int var13 = (var12.field1498 * arg4 + var12.field1497 * arg3 + var12.field1496 * arg2) / (var12.field1499 * arg1) + arg0;
+  1430→                                this.field1203[var6] = method379(var11, var13, 0);
+  1431→                                VertexNormal var14 = super.field1708[var9];
+  1432→                                int var15 = (var14.field1498 * arg4 + var14.field1497 * arg3 + var14.field1496 * arg2) / (var14.field1499 * arg1) + arg0;
+  1433→                                this.field1204[var6] = method379(var11, var15, 0);
+  1434→                                VertexNormal var16 = super.field1708[var10];
+  1435→                                int var17 = (var16.field1498 * arg4 + var16.field1497 * arg3 + var16.field1496 * arg2) / (var16.field1499 * arg1) + arg0;
+  1436→                                this.field1205[var6] = method379(var11, var17, 0);
+  1437→                        } else if ((this.field1206[var6] & 0x1) == 0) {
+  1438→                                int var18 = this.faceColour[var6];
+  1439→                                int var19 = this.field1206[var6];
+  1440→                                VertexNormal var20 = super.field1708[var8];
+  1441→                                int var21 = (var20.field1498 * arg4 + var20.field1497 * arg3 + var20.field1496 * arg2) / (var20.field1499 * arg1) + arg0;
+  1442→                                this.field1203[var6] = method379(var18, var21, var19);
+  1443→                                VertexNormal var22 = super.field1708[var9];
+  1444→                                int var23 = (var22.field1498 * arg4 + var22.field1497 * arg3 + var22.field1496 * arg2) / (var22.field1499 * arg1) + arg0;
+  1445→                                this.field1204[var6] = method379(var18, var23, var19);
+  1446→                                VertexNormal var24 = super.field1708[var10];
+  1447→                                int var25 = (var24.field1498 * arg4 + var24.field1497 * arg3 + var24.field1496 * arg2) / (var24.field1499 * arg1) + arg0;
+  1448→                                this.field1205[var6] = method379(var18, var25, var19);
+  1449→                        }
+  1450→                }
+  1451→                super.field1708 = null;
+  1452→                this.field1228 = null;
+  1453→                this.field1223 = null;
+  1454→                this.field1224 = null;
+  1455→                if (this.field1206 != null) {
+  1456→                        for (int var7 = 0; var7 < this.field1199; var7++) {
+  1457→                                if ((this.field1206[var7] & 0x2) == 2) {
+  1458→                                        return;
+  1459→                                }
+  1460→                        }
+  1461→                }
+  1462→                this.faceColour = null;
+  1463→        }
+  1464→
+  1465→        @ObfuscatedName("LZYQDKJV.a(III)I")
+  1466→        public static final int method379(int arg0, int arg1, int arg2) {
+  1467→                if ((arg2 & 0x2) == 2) {
+  1468→                        if (arg1 < 0) {
+  1469→                                arg1 = 0;
+  1470→                        } else if (arg1 > 127) {
+  1471→                                arg1 = 127;
+  1472→                        }
+  1473→                        return 127 - arg1;
+  1474→                }
+  1475→                int var4 = (arg0 & 0x7F) * arg1 >> 7;
+  1476→                if (var4 < 2) {
+  1477→                        var4 = 2;
+  1478→                } else if (var4 > 126) {
+  1479→                        var4 = 126;
+  1480→                }
+  1481→                return (arg0 & 0xFF80) + var4;
+  1482→        }
+  1483→
+  1484→        @ObfuscatedName("LZYQDKJV.a(IIIIIII)V")
+  1485→        public void method380(int arg0, int arg1, int arg2, int arg3, int arg4, int arg5, int arg6) {
+  1486→                int var8 = Pix3D.centerX;
+  1487→                int var9 = Pix3D.centerY;
+  1488→                int var10 = sinTable[arg0];
+  1489→                int var11 = cosTable[arg0];
+  1490→                int var12 = sinTable[arg1];
+  1491→                int var13 = cosTable[arg1];
+  1492→                int var14 = sinTable[arg2];
+  1493→                int var15 = cosTable[arg2];
+  1494→                int var16 = sinTable[arg3];
+  1495→                int var17 = cosTable[arg3];
+  1496→                int var18 = arg5 * var16 + arg6 * var17 >> 16;
+  1497→                for (int var19 = 0; var19 < this.field1195; var19++) {
+  1498→                        int var20 = this.field1196[var19];
+  1499→                        int var21 = this.field1197[var19];
+  1500→                        int var22 = this.field1198[var19];
+  1501→                        if (arg2 != 0) {
+  1502→                                int var23 = var14 * var21 + var15 * var20 >> 16;
+  1503→                                var21 = var15 * var21 - var14 * var20 >> 16;
+  1504→                                var20 = var23;
+  1505→                        }
+  1506→                        if (arg0 != 0) {
+  1507→                                int var24 = var11 * var21 - var10 * var22 >> 16;
+  1508→                                var22 = var10 * var21 + var11 * var22 >> 16;
+  1509→                                var21 = var24;
+  1510→                        }
+  1511→                        if (arg1 != 0) {
+  1512→                                int var25 = var12 * var22 + var13 * var20 >> 16;
+  1513→                                var22 = var13 * var22 - var12 * var20 >> 16;
+  1514→                                var20 = var25;
+  1515→                        }
+  1516→                        int var26 = arg4 + var20;
+  1517→                        int var27 = arg5 + var21;
+  1518→                        int var28 = arg6 + var22;
+  1519→                        int var29 = var17 * var27 - var16 * var28 >> 16;
+  1520→                        int var30 = var16 * var27 + var17 * var28 >> 16;
+  1521→                        field1235[var19] = var30 - var18;
+  1522→                        field1233[var19] = (var26 << 9) / var30 + var8;
+  1523→                        field1234[var19] = (var29 << 9) / var30 + var9;
+  1524→                        if (this.field1211 > 0) {
+  1525→                                field1236[var19] = var26;
+  1526→                                field1237[var19] = var29;
+  1527→                                field1238[var19] = var30;
+  1528→                        }
+  1529→                }
+  1530→                try {
+  1531→                        this.method382(false, false, 0);
+  1532→                } catch (Exception var32) {
+  1533→                }
+  1534→        }
+  1535→
+  1536→        @ObfuscatedName("LZYQDKJV.a(IIIIIIIII)V")
+  1537→        public void method381(int arg0, int arg1, int arg2, int arg3, int arg4, int arg5, int arg6, int arg7, int arg8) {
+  1538→                int var10 = arg4 * arg7 - arg3 * arg5 >> 16;
+  1539→                int var11 = arg1 * arg6 + arg2 * var10 >> 16;
+  1540→                int var12 = this.field1218 * arg2 >> 16;
+  1541→                int var13 = var11 + var12;
+  1542→                if (var13 <= 50 || var11 >= 3500) {
+  1543→                        return;
+  1544→                }
+  1545→                int var14 = arg3 * arg7 + arg4 * arg5 >> 16;
+  1546→                int var15 = var14 - this.field1218 << 9;
+  1547→                if (var15 / var13 >= Pix2D.centerX2d) {
+  1548→                        return;
+  1549→                }
+  1550→                int var16 = this.field1218 + var14 << 9;
+  1551→                if (var16 / var13 <= -Pix2D.centerX2d) {
+  1552→                        return;
+  1553→                }
+  1554→                int var17 = arg2 * arg6 - arg1 * var10 >> 16;
+  1555→                int var18 = this.field1218 * arg1 >> 16;
+  1556→                int var19 = var17 + var18 << 9;
+  1557→                if (var19 / var13 <= -Pix2D.centerY2d) {
+  1558→                        return;
+  1559→                }
+  1560→                int var20 = (super.field1709 * arg2 >> 16) + var18;
+  1561→                int var21 = var17 - var20 << 9;
+  1562→                if (var21 / var13 >= Pix2D.centerY2d) {
+  1563→                        return;
+  1564→                }
+  1565→                int var22 = (super.field1709 * arg1 >> 16) + var12;
+  1566→                boolean var23 = false;
+  1567→                if (var11 - var22 <= 50) {
+  1568→                        var23 = true;
+  1569→                }
+  1570→                boolean var24 = false;
+  1571→                if (arg8 > 0 && checkHover) {
+  1572→                        int var25 = var11 - var12;
+  1573→                        if (var25 <= 50) {
+  1574→                                var25 = 50;
+  1575→                        }
+  1576→                        int var26;
+  1577→                        int var27;
+  1578→                        if (var14 > 0) {
+  1579→                                var26 = var15 / var13;
+  1580→                                var27 = var16 / var25;
+  1581→                        } else {
+  1582→                                var27 = var16 / var13;
+  1583→                                var26 = var15 / var25;
+  1584→                        }
+  1585→                        int var28;
+  1586→                        int var29;
+  1587→                        if (var17 > 0) {
+  1588→                                var28 = var21 / var13;
+  1589→                                var29 = var19 / var25;
+  1590→                        } else {
+  1591→                                var29 = var19 / var13;
+  1592→                                var28 = var21 / var25;
+  1593→                        }
+  1594→                        int var30 = mouseX - Pix3D.centerX;
+  1595→                        int var31 = mouseY - Pix3D.centerY;
+  1596→                        if (var30 > var26 && var30 < var27 && var31 > var28 && var31 < var29) {
+  1597→                                if (this.field1227) {
+  1598→                                        field1256[pickedCount++] = arg8;
+  1599→                                } else {
+  1600→                                        var24 = true;
+  1601→                                }
+  1602→                        }
+  1603→                }
+  1604→                int var32 = Pix3D.centerX;
+  1605→                int var33 = Pix3D.centerY;
+  1606→                int var34 = 0;
+  1607→                int var35 = 0;
+  1608→                if (arg0 != 0) {
+  1609→                        var34 = sinTable[arg0];
+  1610→                        var35 = cosTable[arg0];
+  1611→                }
+  1612→                for (int var36 = 0; var36 < this.field1195; var36++) {
+  1613→                        int var37 = this.field1196[var36];
+  1614→                        int var38 = this.field1197[var36];
+  1615→                        int var39 = this.field1198[var36];
+  1616→                        if (arg0 != 0) {
+  1617→                                int var40 = var34 * var39 + var35 * var37 >> 16;
+  1618→                                var39 = var35 * var39 - var34 * var37 >> 16;
+  1619→                                var37 = var40;
+  1620→                        }
+  1621→                        int var41 = arg5 + var37;
+  1622→                        int var42 = arg6 + var38;
+  1623→                        int var43 = arg7 + var39;
+  1624→                        int var44 = arg3 * var43 + arg4 * var41 >> 16;
+  1625→                        int var45 = arg4 * var43 - arg3 * var41 >> 16;
+  1626→                        int var47 = arg2 * var42 - arg1 * var45 >> 16;
+  1627→                        int var48 = arg1 * var42 + arg2 * var45 >> 16;
+  1628→                        field1235[var36] = var48 - var11;
+  1629→                        if (var48 >= 50) {
+  1630→                                field1233[var36] = (var44 << 9) / var48 + var32;
+  1631→                                field1234[var36] = (var47 << 9) / var48 + var33;
+  1632→                        } else {
+  1633→                                field1233[var36] = -5000;
+  1634→                                var23 = true;
+  1635→                        }
+  1636→                        if (var23 || this.field1211 > 0) {
+  1637→                                field1236[var36] = var44;
+  1638→                                field1237[var36] = var47;
+  1639→                                field1238[var36] = var48;
+  1640→                        }
+  1641→                }
+  1642→                try {
+  1643→                        this.method382(var23, var24, arg8);
+  1644→                } catch (Exception var50) {
+  1645→                }
+  1646→        }
+  1647→
+  1648→        @ObfuscatedName("LZYQDKJV.a(ZZI)V")
+  1649→        public void method382(boolean arg0, boolean arg1, int arg2) {
+  1650→                for (int var4 = 0; var4 < this.field1220; var4++) {
+  1651→                        field1239[var4] = 0;
+  1652→                }
+  1653→                for (int var5 = 0; var5 < this.field1199; var5++) {
+  1654→                        if (this.field1206 == null || this.field1206[var5] != -1) {
+  1655→                                int var30 = this.field1200[var5];
+  1656→                                int var31 = this.field1201[var5];
+  1657→                                int var32 = this.field1202[var5];
+  1658→                                int var33 = field1233[var30];
+  1659→                                int var34 = field1233[var31];
+  1660→                                int var35 = field1233[var32];
+  1661→                                if (arg0 && (var33 == -5000 || var34 == -5000 || var35 == -5000)) {
+  1662→                                        field1232[var5] = true;
+  1663→                                        int var36 = (field1235[var30] + field1235[var31] + field1235[var32]) / 3 + this.field1221;
+  1664→                                        field1240[var36][field1239[var36]++] = var5;
+  1665→                                } else {
+  1666→                                        if (arg1 && this.method385(mouseX, mouseY, field1234[var30], field1234[var31], field1234[var32], var33, var34, var35)) {
+  1667→                                                field1256[pickedCount++] = arg2;
+  1668→                                                arg1 = false;
+  1669→                                        }
+  1670→                                        if ((field1234[var32] - field1234[var31]) * (var33 - var34) - (field1234[var30] - field1234[var31]) * (var35 - var34) > 0) {
+  1671→                                                field1232[var5] = false;
+  1672→                                                if (var33 >= 0 && var34 >= 0 && var35 >= 0 && var33 <= Pix2D.safeWidth && var34 <= Pix2D.safeWidth && var35 <= Pix2D.safeWidth) {
+  1673→                                                        field1231[var5] = false;
+  1674→                                                } else {
+  1675→                                                        field1231[var5] = true;
+  1676→                                                }
+  1677→                                                int var37 = (field1235[var30] + field1235[var31] + field1235[var32]) / 3 + this.field1221;
+  1678→                                                field1240[var37][field1239[var37]++] = var5;
+  1679→                                        }
+  1680→                                }
+  1681→                        }
+  1682→                }
+  1683→                if (this.field1207 == null) {
+  1684→                        for (int var6 = this.field1220 - 1; var6 >= 0; var6--) {
+  1685→                                int var7 = field1239[var6];
+  1686→                                if (var7 > 0) {
+  1687→                                        int[] var8 = field1240[var6];
+  1688→                                        for (int var9 = 0; var9 < var7; var9++) {
+  1689→                                                this.method383(var8[var9]);
+  1690→                                        }
+  1691→                                }
+  1692→                        }
+  1693→                        return;
+  1694→                }
+  1695→                for (int var10 = 0; var10 < 12; var10++) {
+  1696→                        field1241[var10] = 0;
+  1697→                        field1245[var10] = 0;
+  1698→                }
+  1699→                for (int var11 = this.field1220 - 1; var11 >= 0; var11--) {
+  1700→                        int var24 = field1239[var11];
+  1701→                        if (var24 > 0) {
+  1702→                                int[] var25 = field1240[var11];
+  1703→                                for (int var26 = 0; var26 < var24; var26++) {
+  1704→                                        int var27 = var25[var26];
+  1705→                                        int var28 = this.field1207[var27];
+  1706→                                        int var29 = field1241[var28]++;
+  1707→                                        field1242[var28][var29] = var27;
+  1708→                                        if (var28 < 10) {
+  1709→                                                field1245[var28] += var11;
+  1710→                                        } else if (var28 == 10) {
+  1711→                                                field1243[var29] = var11;
+  1712→                                        } else {
+  1713→                                                field1244[var29] = var11;
+  1714→                                        }
+  1715→                                }
+  1716→                        }
+  1717→                }
+  1718→                int var12 = 0;
+  1719→                if (field1241[1] > 0 || field1241[2] > 0) {
+  1720→                        var12 = (field1245[1] + field1245[2]) / (field1241[1] + field1241[2]);
+  1721→                }
+  1722→                int var13 = 0;
+  1723→                if (field1241[3] > 0 || field1241[4] > 0) {
+  1724→                        var13 = (field1245[3] + field1245[4]) / (field1241[3] + field1241[4]);
+  1725→                }
+  1726→                int var14 = 0;
+  1727→                if (field1241[6] > 0 || field1241[8] > 0) {
+  1728→                        var14 = (field1245[6] + field1245[8]) / (field1241[6] + field1241[8]);
+  1729→                }
+  1730→                int var15 = 0;
+  1731→                int var16 = field1241[10];
+  1732→                int[] var17 = field1242[10];
+  1733→                int[] var18 = field1243;
+  1734→                if (var15 == var16) {
+  1735→                        var15 = 0;
+  1736→                        var16 = field1241[11];
+  1737→                        var17 = field1242[11];
+  1738→                        var18 = field1244;
+  1739→                }
+  1740→                int var19;
+  1741→                if (var15 < var16) {
+  1742→                        var19 = var18[var15];
+  1743→                } else {
+  1744→                        var19 = -1000;
+  1745→                }
+  1746→                for (int var20 = 0; var20 < 10; var20++) {
+  1747→                        while (var20 == 0 && var19 > var12) {
+  1748→                                this.method383(var17[var15++]);
+  1749→                                if (var15 == var16 && field1242[11] != var17) {
+  1750→                                        var15 = 0;
+  1751→                                        var16 = field1241[11];
+  1752→                                        var17 = field1242[11];
+  1753→                                        var18 = field1244;
+  1754→                                }
+  1755→                                if (var15 < var16) {
+  1756→                                        var19 = var18[var15];
+  1757→                                } else {
+  1758→                                        var19 = -1000;
+  1759→                                }
+  1760→                        }
+  1761→                        while (var20 == 3 && var19 > var13) {
+  1762→                                this.method383(var17[var15++]);
+  1763→                                if (var15 == var16 && field1242[11] != var17) {
+  1764→                                        var15 = 0;
+  1765→                                        var16 = field1241[11];
+  1766→                                        var17 = field1242[11];
+  1767→                                        var18 = field1244;
+  1768→                                }
+  1769→                                if (var15 < var16) {
+  1770→                                        var19 = var18[var15];
+  1771→                                } else {
+  1772→                                        var19 = -1000;
+  1773→                                }
+  1774→                        }
+  1775→                        while (var20 == 5 && var19 > var14) {
+  1776→                                this.method383(var17[var15++]);
+  1777→                                if (var15 == var16 && field1242[11] != var17) {
+  1778→                                        var15 = 0;
+  1779→                                        var16 = field1241[11];
+  1780→                                        var17 = field1242[11];
+  1781→                                        var18 = field1244;
+  1782→                                }
+  1783→                                if (var15 < var16) {
+  1784→                                        var19 = var18[var15];
+  1785→                                } else {
+  1786→                                        var19 = -1000;
+  1787→                                }
+  1788→                        }
+  1789→                        int var21 = field1241[var20];
+  1790→                        int[] var22 = field1242[var20];
+  1791→                        for (int var23 = 0; var23 < var21; var23++) {
+  1792→                                this.method383(var22[var23]);
+  1793→                        }
+  1794→                }
+  1795→                while (var19 != -1000) {
+  1796→                        this.method383(var17[var15++]);
+  1797→                        if (var15 == var16 && field1242[11] != var17) {
+  1798→                                var15 = 0;
+  1799→                                var17 = field1242[11];
+  1800→                                var16 = field1241[11];
+  1801→                                var18 = field1244;
+  1802→                        }
+  1803→                        if (var15 < var16) {
+  1804→                                var19 = var18[var15];
+  1805→                        } else {
+  1806→                                var19 = -1000;
+  1807→                        }
+  1808→                }
+  1809→        }
+  1810→
+  1811→        @ObfuscatedName("LZYQDKJV.h(I)V")
+  1812→        public void method383(int arg0) {
+  1813→                if (field1232[arg0]) {
+  1814→                        this.method384(arg0);
+  1815→                        return;
+  1816→                }
+  1817→                int var2 = this.field1200[arg0];
+  1818→                int var3 = this.field1201[arg0];
+  1819→                int var4 = this.field1202[arg0];
+  1820→                Pix3D.hclip = field1231[arg0];
+  1821→                if (this.field1208 == null) {
+  1822→                        Pix3D.field1593 = 0;
+  1823→                } else {
+  1824→                        Pix3D.field1593 = this.field1208[arg0];
+  1825→                }
+  1826→                int var5;
+  1827→                if (this.field1206 == null) {
+  1828→                        var5 = 0;
+  1829→                } else {
+  1830→                        var5 = this.field1206[arg0] & 0x3;
+  1831→                }
+  1832→                if (var5 == 0) {
+  1833→                        Pix3D.gouraudTriangle(field1234[var2], field1234[var3], field1234[var4], field1233[var2], field1233[var3], field1233[var4], this.field1203[arg0], this.field1204[arg0], this.field1205[arg0]);
+  1834→                } else if (var5 == 1) {
+  1835→                        Pix3D.flatTriangle(field1234[var2], field1234[var3], field1234[var4], field1233[var2], field1233[var3], field1233[var4], field1259[this.field1203[arg0]]);
+  1836→                } else if (var5 == 2) {
+  1837→                        int var6 = this.field1206[arg0] >> 2;
+  1838→                        int var7 = this.field1212[var6];
+  1839→                        int var8 = this.field1213[var6];
+  1840→                        int var9 = this.field1214[var6];
+  1841→                        Pix3D.textureTriangle(field1234[var2], field1234[var3], field1234[var4], field1233[var2], field1233[var3], field1233[var4], this.field1203[arg0], this.field1204[arg0], this.field1205[arg0], field1236[var7], field1236[var8], field1236[var9], field1237[var7], field1237[var8], field1237[var9], field1238[var7], field1238[var8], field1238[var9], this.faceColour[arg0]);
+  1842→                } else if (var5 == 3) {
+  1843→                        int var10 = this.field1206[arg0] >> 2;
+  1844→                        int var11 = this.field1212[var10];
+  1845→                        int var12 = this.field1213[var10];
+  1846→                        int var13 = this.field1214[var10];
+  1847→                        Pix3D.textureTriangle(field1234[var2], field1234[var3], field1234[var4], field1233[var2], field1233[var3], field1233[var4], this.field1203[arg0], this.field1203[arg0], this.field1203[arg0], field1236[var11], field1236[var12], field1236[var13], field1237[var11], field1237[var12], field1237[var13], field1238[var11], field1238[var12], field1238[var13], this.faceColour[arg0]);
+  1848→                }
+  1849→        }
+  1850→
+  1851→        @ObfuscatedName("LZYQDKJV.i(I)V")
+  1852→        public void method384(int arg0) {
+  1853→                int var2 = Pix3D.centerX;
+  1854→                int var3 = Pix3D.centerY;
+  1855→                int var4 = 0;
+  1856→                int var5 = this.field1200[arg0];
+  1857→                int var6 = this.field1201[arg0];
+  1858→                int var7 = this.field1202[arg0];
+  1859→                int var8 = field1238[var5];
+  1860→                int var9 = field1238[var6];
+  1861→                int var10 = field1238[var7];
+  1862→                if (var8 >= 50) {
+  1863→                        field1246[var4] = field1233[var5];
+  1864→                        field1247[var4] = field1234[var5];
+  1865→                        field1248[var4++] = this.field1203[arg0];
+  1866→                } else {
+  1867→                        int var11 = field1236[var5];
+  1868→                        int var12 = field1237[var5];
+  1869→                        int var13 = this.field1203[arg0];
+  1870→                        if (var10 >= 50) {
+  1871→                                int var14 = (50 - var8) * field1260[var10 - var8];
+  1872→                                field1246[var4] = (((field1236[var7] - var11) * var14 >> 16) + var11 << 9) / 50 + var2;
+  1873→                                field1247[var4] = (((field1237[var7] - var12) * var14 >> 16) + var12 << 9) / 50 + var3;
+  1874→                                field1248[var4++] = ((this.field1205[arg0] - var13) * var14 >> 16) + var13;
+  1875→                        }
+  1876→                        if (var9 >= 50) {
+  1877→                                int var15 = (50 - var8) * field1260[var9 - var8];
+  1878→                                field1246[var4] = (((field1236[var6] - var11) * var15 >> 16) + var11 << 9) / 50 + var2;
+  1879→                                field1247[var4] = (((field1237[var6] - var12) * var15 >> 16) + var12 << 9) / 50 + var3;
+  1880→                                field1248[var4++] = ((this.field1204[arg0] - var13) * var15 >> 16) + var13;
+  1881→                        }
+  1882→                }
+  1883→                if (var9 >= 50) {
+  1884→                        field1246[var4] = field1233[var6];
+  1885→                        field1247[var4] = field1234[var6];
+  1886→                        field1248[var4++] = this.field1204[arg0];
+  1887→                } else {
+  1888→                        int var16 = field1236[var6];
+  1889→                        int var17 = field1237[var6];
+  1890→                        int var18 = this.field1204[arg0];
+  1891→                        if (var8 >= 50) {
+  1892→                                int var19 = (50 - var9) * field1260[var8 - var9];
+  1893→                                field1246[var4] = (((field1236[var5] - var16) * var19 >> 16) + var16 << 9) / 50 + var2;
+  1894→                                field1247[var4] = (((field1237[var5] - var17) * var19 >> 16) + var17 << 9) / 50 + var3;
+  1895→                                field1248[var4++] = ((this.field1203[arg0] - var18) * var19 >> 16) + var18;
+  1896→                        }
+  1897→                        if (var10 >= 50) {
+  1898→                                int var20 = (50 - var9) * field1260[var10 - var9];
+  1899→                                field1246[var4] = (((field1236[var7] - var16) * var20 >> 16) + var16 << 9) / 50 + var2;
+  1900→                                field1247[var4] = (((field1237[var7] - var17) * var20 >> 16) + var17 << 9) / 50 + var3;
+  1901→                                field1248[var4++] = ((this.field1205[arg0] - var18) * var20 >> 16) + var18;
+  1902→                        }
+  1903→                }
+  1904→                if (var10 >= 50) {
+  1905→                        field1246[var4] = field1233[var7];
+  1906→                        field1247[var4] = field1234[var7];
+  1907→                        field1248[var4++] = this.field1205[arg0];
+  1908→                } else {
+  1909→                        int var21 = field1236[var7];
+  1910→                        int var22 = field1237[var7];
+  1911→                        int var23 = this.field1205[arg0];
+  1912→                        if (var9 >= 50) {
+  1913→                                int var24 = (50 - var10) * field1260[var9 - var10];
+  1914→                                field1246[var4] = (((field1236[var6] - var21) * var24 >> 16) + var21 << 9) / 50 + var2;
+  1915→                                field1247[var4] = (((field1237[var6] - var22) * var24 >> 16) + var22 << 9) / 50 + var3;
+  1916→                                field1248[var4++] = ((this.field1204[arg0] - var23) * var24 >> 16) + var23;
+  1917→                        }
+  1918→                        if (var8 >= 50) {
+  1919→                                int var25 = (50 - var10) * field1260[var8 - var10];
+  1920→                                field1246[var4] = (((field1236[var5] - var21) * var25 >> 16) + var21 << 9) / 50 + var2;
+  1921→                                field1247[var4] = (((field1237[var5] - var22) * var25 >> 16) + var22 << 9) / 50 + var3;
+  1922→                                field1248[var4++] = ((this.field1203[arg0] - var23) * var25 >> 16) + var23;
+  1923→                        }
+  1924→                }
+  1925→                int var26 = field1246[0];
+  1926→                int var27 = field1246[1];
+  1927→                int var28 = field1246[2];
+  1928→                int var29 = field1247[0];
+  1929→                int var30 = field1247[1];
+  1930→                int var31 = field1247[2];
+  1931→                if ((var26 - var27) * (var31 - var30) - (var28 - var27) * (var29 - var30) <= 0) {
+  1932→                        return;
+  1933→                }
+  1934→                Pix3D.hclip = false;
+  1935→                if (var4 == 3) {
+  1936→                        if (var26 < 0 || var27 < 0 || var28 < 0 || var26 > Pix2D.safeWidth || var27 > Pix2D.safeWidth || var28 > Pix2D.safeWidth) {
+  1937→                                Pix3D.hclip = true;
+  1938→                        }
+  1939→                        int var32;
+  1940→                        if (this.field1206 == null) {
+  1941→                                var32 = 0;
+  1942→                        } else {
+  1943→                                var32 = this.field1206[arg0] & 0x3;
+  1944→                        }
+  1945→                        if (var32 == 0) {
+  1946→                                Pix3D.gouraudTriangle(var29, var30, var31, var26, var27, var28, field1248[0], field1248[1], field1248[2]);
+  1947→                        } else if (var32 == 1) {
+  1948→                                Pix3D.flatTriangle(var29, var30, var31, var26, var27, var28, field1259[this.field1203[arg0]]);
+  1949→                        } else if (var32 == 2) {
+  1950→                                int var33 = this.field1206[arg0] >> 2;
+  1951→                                int var34 = this.field1212[var33];
+  1952→                                int var35 = this.field1213[var33];
+  1953→                                int var36 = this.field1214[var33];
+  1954→                                Pix3D.textureTriangle(var29, var30, var31, var26, var27, var28, field1248[0], field1248[1], field1248[2], field1236[var34], field1236[var35], field1236[var36], field1237[var34], field1237[var35], field1237[var36], field1238[var34], field1238[var35], field1238[var36], this.faceColour[arg0]);
+  1955→                        } else if (var32 == 3) {
+  1956→                                int var37 = this.field1206[arg0] >> 2;
+  1957→                                int var38 = this.field1212[var37];
+  1958→                                int var39 = this.field1213[var37];
+  1959→                                int var40 = this.field1214[var37];
+  1960→                                Pix3D.textureTriangle(var29, var30, var31, var26, var27, var28, this.field1203[arg0], this.field1203[arg0], this.field1203[arg0], field1236[var38], field1236[var39], field1236[var40], field1237[var38], field1237[var39], field1237[var40], field1238[var38], field1238[var39], field1238[var40], this.faceColour[arg0]);
+  1961→                        }
+  1962→                }
+  1963→                if (var4 != 4) {
+  1964→                        return;
+  1965→                }
+  1966→                if (var26 < 0 || var27 < 0 || var28 < 0 || var26 > Pix2D.safeWidth || var27 > Pix2D.safeWidth || var28 > Pix2D.safeWidth || field1246[3] < 0 || field1246[3] > Pix2D.safeWidth) {
+  1967→                        Pix3D.hclip = true;
+  1968→                }
+  1969→                int var41;
+  1970→                if (this.field1206 == null) {
+  1971→                        var41 = 0;
+  1972→                } else {
+  1973→                        var41 = this.field1206[arg0] & 0x3;
+  1974→                }
+  1975→                if (var41 == 0) {
+  1976→                        Pix3D.gouraudTriangle(var29, var30, var31, var26, var27, var28, field1248[0], field1248[1], field1248[2]);
+  1977→                        Pix3D.gouraudTriangle(var29, var31, field1247[3], var26, var28, field1246[3], field1248[0], field1248[2], field1248[3]);
+  1978→                        return;
+  1979→                }
+  1980→                if (var41 == 1) {
+  1981→                        int var42 = field1259[this.field1203[arg0]];
+  1982→                        Pix3D.flatTriangle(var29, var30, var31, var26, var27, var28, var42);
+  1983→                        Pix3D.flatTriangle(var29, var31, field1247[3], var26, var28, field1246[3], var42);
+  1984→                        return;
+  1985→                }
+  1986→                if (var41 == 2) {
+  1987→                        int var43 = this.field1206[arg0] >> 2;
+  1988→                        int var44 = this.field1212[var43];
+  1989→                        int var45 = this.field1213[var43];
+  1990→                        int var46 = this.field1214[var43];
+  1991→                        Pix3D.textureTriangle(var29, var30, var31, var26, var27, var28, field1248[0], field1248[1], field1248[2], field1236[var44], field1236[var45], field1236[var46], field1237[var44], field1237[var45], field1237[var46], field1238[var44], field1238[var45], field1238[var46], this.faceColour[arg0]);
+  1992→                        Pix3D.textureTriangle(var29, var31, field1247[3], var26, var28, field1246[3], field1248[0], field1248[2], field1248[3], field1236[var44], field1236[var45], field1236[var46], field1237[var44], field1237[var45], field1237[var46], field1238[var44], field1238[var45], field1238[var46], this.faceColour[arg0]);
+  1993→                        return;
+  1994→                }
+  1995→                if (var41 != 3) {
+  1996→                        return;
+  1997→                }
+  1998→                int var47 = this.field1206[arg0] >> 2;
+  1999→                int var48 = this.field1212[var47];
+  2000→                int var49 = this.field1213[var47];
+
+[showing lines 1-2000 of 2019; use offset=2001 with limit to continue reading]

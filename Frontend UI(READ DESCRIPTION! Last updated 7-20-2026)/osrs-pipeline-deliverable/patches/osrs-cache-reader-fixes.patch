@@ -1,0 +1,423 @@
+diff --git a/lostcity/engine/src/cache/osrs/OsrsCacheReader.ts b/lostcity/engine/src/cache/osrs/OsrsCacheReader.ts
+old mode 100644
+new mode 100755
+diff --git a/lostcity/engine/src/cache/osrs/OsrsNpcType.ts b/lostcity/engine/src/cache/osrs/OsrsNpcType.ts
+old mode 100644
+new mode 100755
+index 39ef43b6..53d6b1be
+--- a/lostcity/engine/src/cache/osrs/OsrsNpcType.ts
++++ b/lostcity/engine/src/cache/osrs/OsrsNpcType.ts
+@@ -156,147 +156,87 @@ export default class OsrsNpcType extends ConfigType {
+     recol_s_tex: Uint16Array | null = null;
+     recol_d_tex: Uint16Array | null = null;
+ 
+-    /** Code 118: sizeH — height-extended (used when size > 255). */
+-    sizeH: number = -1;
+-    /** Code 119: sizeW — width-extended. */
+-    sizeW: number = -1;
+-
+-    /** Code 121 (2 shorts): minimap icon override. */
+-    mapFunction: number = -1;
+-    mapScene: number = -1;
+-
+-    /** Code 122: render-scale Z hint. */
+-    heightmap: number = -1;
+-
+-    /** Code 123: cursor hover popup text. */
+-    hoverText: string | null = null;
+-
+-    /** Code 124: mirror render horizontally (0 or 1). */
+-    flipX: number = 0;
+-    /** Code 125: mirror render vertically (0 or 1). */
+-    flipY: number = 0;
+-    /** Code 126: render-priority override (-1 = unset). */
+-    forceRenderPriority: number = -1;
+-    /** Code 127: minimap clipping override (-1 = unset, 0 = no clip, 1 = normal). */
+-    clipOnMinimap: number = -1;
+-    /** Code 128: collision override (-1 = unset). */
+-    clip: number = -1;
+-    /** Code 129: interactable override (-1 = unset). */
+-    interactable: number = -1;
+-
++    /** Code 124: height (u16). */
++    height: number = -1;
++    /** Code 126: footprintSize (u16). */
++    footprintSize: number = -1;
++    /** Code 146: overlapTintHSL (u16). */
++    overlapTintHSL: number = -1;
++    /** Code 129: unknown1 flag. */
++    unknown1: boolean = false;
++    /** Code 130: idleAnimRestart flag. */
++    idleAnimRestart: boolean = false;
++    /** Code 145: canHideForOverlap flag. */
++    canHideForOverlap: boolean = false;
++    /** Code 147: zbuf flag (false = disable z-buffer). */
++    zbuf: boolean = true;
++    /** Code 109: rotationFlag (false = don't rotate to face player). */
++    rotationFlag: boolean = true;
++    /** Code 111: renderPriority (2 = very high). */
++    renderPriority: number = 0;
++    /** Code 122: isFollower flag. */
++    isFollower: boolean = false;
++    /** Code 123: lowPriorityFollowerOps flag. */
++    lowPriorityFollowerOps: boolean = false;
++    /** Code 15: idleRotateLeftAnimation. */
++    idleRotateLeftAnim: number = -1;
++    /** Code 16: idleRotateRightAnimation. */
++    idleRotateRightAnim: number = -1;
++    /**
++     * Code 102 (rev >= 1493): head icon bitfield form.
++     * headIconArchiveIds[i] / headIconSpriteIndex[i] parallel arrays.
++     */
++    headIconArchiveIds: Int32Array | null = null;
++    headIconSpriteIndex: Int16Array | null = null;
+     /**
+-     * Codes 130..134: opaque OSRS extension bytes (ambient/contrast/etc).
+-     * The task spec describes these as "store opaquely" — semantic meaning
+-     * isn't documented upstream. Indexed by `code - 130`; default 0.
++     * Code 61: models with 32-bit IDs (for caches with >65535 models).
++     * Code 62: chatheadModels with 32-bit IDs.
+      */
+-    osrsExtensions: Int8Array = new Int8Array(5);
++    models32: Int32Array | null = null;
++    chatheadModels32: Int32Array | null = null;
+ 
+     constructor(id: number) {
+         super(id);
+     }
+ 
+     decode(code: number, dat: Packet): void {
++        // ------------------------------------------------------------------
++        // Opcodes ported EXACTLY from RuneLite's NpcLoader.java (rev 237).
++        // The modern OSRS npc.dat uses this opcode set. Any opcode not listed
++        // here is unrecognized — RuneLite logs a warning and reads ZERO bytes
++        // (which would desync the stream if the opcode carried a payload).
++        // ------------------------------------------------------------------
+         if (code === 1) {
++            // models[] with 16-bit IDs
+             const count: number = dat.g1();
+             this.models = new Uint16Array(count);
+             for (let i: number = 0; i < count; i++) {
+                 this.models[i] = dat.g2();
+             }
+         } else if (code === 2) {
+-            this.name = dat.gjstr();
+-        } else if (code === 3) {
+-            // 377 NpcType uses gjstr() here (Java client uses gjstrraw() which
+-            // returns raw bytes — but the existing TS desc field is a string).
+-            // Match the 377 TS convention; if raw bytes are needed for an
+-            // exact OSRS round-trip, a future task should add a Packet.gjstrraw()
+-            // method and store desc as Uint8Array.
+-            this.desc = dat.gjstr();
++            this.name = dat.gjstr(0);
+         } else if (code === 12) {
+-            this.size = dat.g1b();
++            this.size = dat.g1();
+         } else if (code === 13) {
+             this.readyanim = dat.g2();
+         } else if (code === 14) {
+             this.walkanim = dat.g2();
++        } else if (code === 15) {
++            this.idleRotateLeftAnim = dat.g2();
+         } else if (code === 16) {
+-            // 377 hasanim flag (no payload).
+-            this.hasanim = true;
++            this.idleRotateRightAnim = dat.g2();
+         } else if (code === 17) {
+-            // Spec order: walk, back, left, right (matches RL NpcDefinition).
+-            // Note: the existing 377 NpcType.ts reads these in a different
+-            // order (walk, back, right, left) — that is a pre-existing
+-            // LostCity convention/bug for 377 caches. Since this decoder
+-            // reads OSRS caches (which use the spec/RL order), we follow
+-            // the spec here. If LostCity ever regenerates its 377 npc.dat
+-            // from RL sources, the 377 NpcType.ts should be updated to
+-            // match this order too.
+             this.walkanim = dat.g2();
+             this.walkanim_b = dat.g2();
+             this.walkanim_l = dat.g2();
+             this.walkanim_r = dat.g2();
+         } else if (code === 18) {
+-            // Legacy 377 category. OSRS uses opcode 23 for the walk-anim family
+-            // but opcode 18 is kept for legacy compat.
+             this.category = dat.g2();
+-        } else if (code === 23) {
+-            // OSRS — 5 shorts: stand, walk, walkL, walkR, walkB.
+-            // Replaces readyanim/walkanim/walkanim_l/walkanim_r/walkanim_b
+-            // (the same fields populated by 377 codes 13/14/17).
+-            this.readyanim = dat.g2();
+-            this.walkanim = dat.g2();
+-            this.walkanim_l = dat.g2();
+-            this.walkanim_r = dat.g2();
+-            this.walkanim_b = dat.g2();
+-        } else if (code === 24) {
+-            // OSRS — 4 shorts: run, runL, runR, runB.
+-            this.runanim = dat.g2();
+-            this.runanim_l = dat.g2();
+-            this.runanim_r = dat.g2();
+-            this.runanim_b = dat.g2();
+-        } else if (code === 25) {
+-            // OSRS — 4 shorts: crawl, crawlL, crawlR, crawlB.
+-            this.crawlanim = dat.g2();
+-            this.crawlanim_l = dat.g2();
+-            this.crawlanim_r = dat.g2();
+-            this.crawlanim_b = dat.g2();
+-        } else if (code === 26) {
+-            // OSRS — 5 shorts: crawl, crawlL, crawlR, crawlB, crawlBack2.
+-            // Overwrites the 4 crawl fields from code 25 (last wins) and
+-            // additionally populates crawlanim_b2.
+-            this.crawlanim = dat.g2();
+-            this.crawlanim_l = dat.g2();
+-            this.crawlanim_r = dat.g2();
+-            this.crawlanim_b = dat.g2();
+-            this.crawlanim_b2 = dat.g2();
+-        } else if (code === 27) {
+-            // OSRS — extended op menu entries: u8 index, gjstr label.
+-            // Indices 5..9 give op6..op10; index may also overwrite 0..4
+-            // (rare in practice). Lazy-size the array up to 10 entries.
+-            const index: number = dat.g1();
+-            const label: string = dat.gjstr();
++        } else if (code >= 30 && code < 35) {
+             if (!this.op) {
+                 this.op = new Array(10).fill(null);
+-            } else if (this.op.length <= index) {
+-                const grown: (string | null)[] = new Array(index + 1).fill(null);
+-                for (let i: number = 0; i < this.op.length; i++) {
+-                    grown[i] = this.op[i];
+-                }
+-                this.op = grown;
+             }
+-            this.op[index] = label;
+-        } else if (code === 28) {
+-            // OSRS — texture-mapped recolor dst. Shape: count + (g2, g2) pairs.
+-            this.decodeTexRecolors(dat);
+-        } else if (code === 29) {
+-            // OSRS — texture-mapped recolor src/dst (paired with 28). Same shape.
+-            this.decodeTexRecolors(dat);
+-        } else if (code >= 30 && code < 40) {
+-            // Legacy 377 op menu entries: op1..op5 (codes 30..34).
+-            // Codes 35..39 are unused in practice but the 377 decoder accepts
+-            // the full 30..39 range; we mirror that for parity.
+-            if (!this.op) {
+-                this.op = new Array(10).fill(null);
+-            }
+-            this.op[code - 30] = dat.gjstr();
++            this.op[code - 30] = dat.gjstr(0);
+         } else if (code === 40) {
+             const count: number = dat.g1();
+             this.recol_s = new Uint16Array(count);
+@@ -305,12 +245,32 @@ export default class OsrsNpcType extends ConfigType {
+                 this.recol_s[i] = dat.g2();
+                 this.recol_d[i] = dat.g2();
+             }
++        } else if (code === 41) {
++            const count: number = dat.g1();
++            this.recol_s_tex = new Uint16Array(count);
++            this.recol_d_tex = new Uint16Array(count);
++            for (let i: number = 0; i < count; i++) {
++                this.recol_s_tex[i] = dat.g2();
++                this.recol_d_tex[i] = dat.g2();
++            }
+         } else if (code === 60) {
+             const count: number = dat.g1();
+             this.heads = new Uint16Array(count);
+             for (let i: number = 0; i < count; i++) {
+                 this.heads[i] = dat.g2();
+             }
++        } else if (code === 61) {
++            const count: number = dat.g1();
++            this.models32 = new Int32Array(count);
++            for (let i: number = 0; i < count; i++) {
++                this.models32[i] = dat.g4();
++            }
++        } else if (code === 62) {
++            const count: number = dat.g1();
++            this.chatheadModels32 = new Int32Array(count);
++            for (let i: number = 0; i < count; i++) {
++                this.chatheadModels32[i] = dat.g4();
++            }
+         } else if (code === 74) {
+             this.stats[0] = dat.g2();
+         } else if (code === 75) {
+@@ -323,12 +283,6 @@ export default class OsrsNpcType extends ConfigType {
+             this.stats[4] = dat.g2();
+         } else if (code === 79) {
+             this.stats[5] = dat.g2();
+-        } else if (code === 90) {
+-            this.resizex = dat.g2();
+-        } else if (code === 91) {
+-            this.resizey = dat.g2();
+-        } else if (code === 92) {
+-            this.resizez = dat.g2();
+         } else if (code === 93) {
+             this.minimap = false;
+         } else if (code === 95) {
+@@ -338,90 +292,110 @@ export default class OsrsNpcType extends ConfigType {
+         } else if (code === 98) {
+             this.resizev = dat.g2();
+         } else if (code === 99) {
+-            this.alwaysontop = true;
++            this.renderPriority = 1;
+         } else if (code === 100) {
+             this.ambient = dat.g1b();
+         } else if (code === 101) {
+-            // 377 NpcType stores the raw signed byte; the Java client
+-            // multiplies by 5 to compute the effective contrast value.
+-            // Match the 377 TS convention (store raw byte; consumer scales).
+             this.contrast = dat.g1b();
+         } else if (code === 102) {
+-            this.headicon = dat.g2();
++            // rev210+ head icons: bitfield form
++            const bitfield: number = dat.g1();
++            let len = 0;
++            for (let v = bitfield; v !== 0; v >>= 1) len++;
++            this.headIconArchiveIds = new Int32Array(len);
++            this.headIconSpriteIndex = new Int16Array(len);
++            for (let i = 0; i < len; i++) {
++                if ((bitfield & (1 << i)) === 0) {
++                    this.headIconArchiveIds[i] = -1;
++                    this.headIconSpriteIndex[i] = -1;
++                } else {
++                    const peek = dat.data[dat.pos];
++                    if (peek >= 128) {
++                        this.headIconArchiveIds[i] = dat.g4() & 0x7FFFFFFF;
++                    } else {
++                        const v = dat.g2();
++                        this.headIconArchiveIds[i] = v === 32767 ? -1 : v;
++                    }
++                    const peek2 = dat.data[dat.pos];
++                    if (peek2 < 128) {
++                        this.headIconSpriteIndex[i] = dat.g1() - 1;
++                    } else {
++                        this.headIconSpriteIndex[i] = dat.g2() - 0x8001;
++                    }
++                }
++            }
+         } else if (code === 103) {
+             this.turnspeed = dat.g2();
+         } else if (code === 106) {
+             this.multivarbit = dat.g2();
+-            if (this.multivarbit === 65535) {
+-                this.multivarbit = -1;
+-            }
++            if (this.multivarbit === 65535) this.multivarbit = -1;
+             this.multivarp = dat.g2();
+-            if (this.multivarp === 65535) {
+-                this.multivarp = -1;
+-            }
++            if (this.multivarp === 65535) this.multivarp = -1;
+             const count: number = dat.g1();
+-            this.multinpc = new Array(count + 1);
++            this.multinpc = new Array(count + 2);
+             for (let i: number = 0; i <= count; i++) {
+                 this.multinpc[i] = dat.g2();
+-                if (this.multinpc[i] === 65535) {
+-                    this.multinpc[i] = -1;
+-                }
++                if (this.multinpc[i] === 65535) this.multinpc[i] = -1;
+             }
++            this.multinpc[count + 1] = -1;
+         } else if (code === 107) {
+             this.active = false;
++        } else if (code === 109) {
++            this.rotationFlag = false;
++        } else if (code === 111) {
++            this.renderPriority = 2;
++        } else if (code === 114) {
++            this.runanim = dat.g2();
++        } else if (code === 115) {
++            this.runanim = dat.g2();
++            this.runanim_b = dat.g2();
++            this.runanim_l = dat.g2();
++            this.runanim_r = dat.g2();
++        } else if (code === 116) {
++            this.crawlanim = dat.g2();
++        } else if (code === 117) {
++            this.crawlanim = dat.g2();
++            this.crawlanim_b = dat.g2();
++            this.crawlanim_l = dat.g2();
++            this.crawlanim_r = dat.g2();
+         } else if (code === 118) {
+-            // OSRS — height-extended size (for NPCs with size > 255).
+-            this.sizeH = dat.g2();
+-        } else if (code === 119) {
+-            // OSRS — width-extended size.
+-            this.sizeW = dat.g2();
+-        } else if (code === 121) {
+-            // OSRS — minimap icon override (2 shorts).
+-            this.mapFunction = dat.g2();
+-            this.mapScene = dat.g2();
++            this.multivarbit = dat.g2();
++            if (this.multivarbit === 65535) this.multivarbit = -1;
++            this.multivarp = dat.g2();
++            if (this.multivarp === 65535) this.multivarp = -1;
++            const fallbackVar = dat.g2();
++            const count: number = dat.g1();
++            this.multinpc = new Array(count + 2);
++            for (let i: number = 0; i <= count; i++) {
++                this.multinpc[i] = dat.g2();
++                if (this.multinpc[i] === 65535) this.multinpc[i] = -1;
++            }
++            this.multinpc[count + 1] = fallbackVar === 0xFFFF ? -1 : fallbackVar;
+         } else if (code === 122) {
+-            // OSRS — render-scale Z hint.
+-            this.heightmap = dat.g2();
++            this.isFollower = true;
+         } else if (code === 123) {
+-            // OSRS — cursor hover popup text.
+-            this.hoverText = dat.gjstr();
++            this.lowPriorityFollowerOps = true;
+         } else if (code === 124) {
+-            // OSRS — mirror render horizontally.
+-            this.flipX = dat.g1();
+-        } else if (code === 125) {
+-            // OSRS — mirror render vertically.
+-            this.flipY = dat.g1();
++            this.height = dat.g2();
+         } else if (code === 126) {
+-            // OSRS — render-priority override.
+-            this.forceRenderPriority = dat.g1();
+-        } else if (code === 127) {
+-            // OSRS — minimap clipping override.
+-            this.clipOnMinimap = dat.g1();
+-        } else if (code === 128) {
+-            // OSRS — collision override.
+-            this.clip = dat.g1();
++            this.footprintSize = dat.g2();
+         } else if (code === 129) {
+-            // OSRS — interactable override.
+-            this.interactable = dat.g1();
+-        } else if (code >= 130 && code <= 134) {
+-            // OSRS — opaque extension bytes. Store in a fixed 5-slot array
+-            // indexed by (code - 130). Semantic meaning not documented
+-            // upstream; consumers should treat as opaque.
+-            this.osrsExtensions[code - 130] = dat.g1();
++            this.unknown1 = true;
++        } else if (code === 130) {
++            this.idleAnimRestart = true;
++        } else if (code === 145) {
++            this.canHideForOverlap = true;
++        } else if (code === 146) {
++            this.overlapTintHSL = dat.g2();
++        } else if (code === 147) {
++            this.zbuf = false;
+         } else if (code === 249) {
+             this.params = ParamHelper.decodeParams(dat);
+         } else if (code === 250) {
+-            this.debugname = dat.gjstr();
++            this.debugname = dat.gjstr(0);
+         } else if (code >= 200 && code <= 214) {
+-            // LostCity server-side extensions (wanderrange, maxrange,
+-            // moverestrict, patrol, etc). These only appear in the
+-            // server-side npc.dat that LostCity generates — they are NOT
+-            // part of the OSRS spec. Read-and-discard the payload so this
+-            // decoder can parse a LostCity npc.dat without crashing.
+             this.skipLostCityServerCode(code, dat);
+         } else {
+-            // Genuine unknown opcode. Warn loudly so the dep tracer (task 6)
+-            // can flag the offending NPC rather than silently dropping data.
+             printWarning(`Unrecognized osrs npc config code: ${code} (npc id=${this.id})`);
+         }
+     }
+diff --git a/lostcity/engine/src/cache/osrs/OsrsSeqType.ts b/lostcity/engine/src/cache/osrs/OsrsSeqType.ts
+old mode 100644
+new mode 100755

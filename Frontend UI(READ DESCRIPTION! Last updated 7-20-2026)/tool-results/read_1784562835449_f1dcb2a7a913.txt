@@ -1,0 +1,703 @@
+     1→#!/usr/bin/env bun
+     2→/**
+     3→ * PilotTormentedDemon.ts — Part B of the Tormented Demon end-to-end pilot
+     4→ * (Task 10 of the OSRS → 377 model pipeline).
+     5→ *
+     6→ * ----------------------------------------------------------------------------
+     7→ * What this script does
+     8→ * ----------------------------------------------------------------------------
+     9→ *
+    10→ * Wires together EVERY piece of the OSRS → 377 import pipeline (Tasks 5-9)
+    11→ * end-to-end against a synthesized Tormented Demon fixture, and asserts that
+    12→ * every stage produces the expected output. Proves the pipeline works before
+    13→ * the user drops a real OSRS cache into `engine/data/osrs-cache/`.
+    14→ *
+    15→ * The 7 stages exercised:
+    16→ *
+    17→ *   1. FIXTURE   — `generateTormentedDemonFixture()` writes a temp dir
+    18→ *                  containing a fake combat script + the
+    19→ *                  `TormentedDemonStubReader` synthesizes OSRS-shaped bytes
+    20→ *                  (model, anim-base, anim frames, seq, npc config) in
+    21→ *                  memory using the REAL OSRS decoders.
+    22→ *
+    23→ *   2. TRACE     — `DependencyTracer.trace(npcId)` walks the OSRS NPC's
+    24→ *                  transitive deps (models, seqs, anims, anim-base, params,
+    25→ *                  combat script) and produces a `DepsMap`. The script
+    26→ *                  scanner discovers the `fire_shield` obj ref via the
+    27→ *                  fake combat script's `inv_has(worn, fire_shield)` call
+    28→ *                  site and records it as a MISSING dep — proving the
+    29→ *                  tracer walks the script → obj edge (the user's goal).
+    30→ *
+    31→ *   3. DEPS WRITE — The DepsMap is written to
+    32→ *                  `<contentDir>/deps/osrs_tormented_demon.deps.json` so
+    33→ *                  downstream stages (and humans) can inspect it.
+    34→ *
+    35→ *   4. IMPORT    — `ContentFolderWriter.importNpc(npcId, depsMap)` walks
+    36→ *                  the deps map, fetches each OSRS asset via the stub
+    37→ *                  reader, transforms it to 377 bytes via
+    38→ *                  `OsrsModel.toLegacy377()` / `OsrsAnimFrame.toLegacy377()`
+    39→ *                  / `OsrsNpcType.toLegacy377NpcConfig()`, and writes the
+    40→ *                  result to the content folder + pack files.
+    41→ *
+    42→ *   5. REGISTER  — `VariantRegistry.registerVariant(npcId, osrsImportedNpcId,
+    43→ *                  depsMap)` adds an entry to `variants.json` with
+    44→ *                  `legacyNpcId: -1` (Tormented Demon is brand-new — no
+    45→ *                  legacy twin) and the OSRS-imported NPC's new 377 ID.
+    46→ *
+    47→ *   6. INDEX     — `regenerateIndex(contentDir)` (exported from
+    48→ *                  `UpdateVariantsIndex.ts`) regenerates the variants.json
+    49→ *                  index from all `*.deps.json` files in the content dir.
+    50→ *                  This verifies the index can be rebuilt from disk after
+    51→ *                  an import (the real-cache path does this after every
+    52→ *                  `Import.ts` run).
+    53→ *
+    54→ *   7. ASSERT    — Run assertions on every stage's output. Print a clean
+    55→ *                  "PILOT PASS — ..." summary line. Exit 0 on pass, 1 on
+    56→ *                  any assertion failure.
+    57→ *
+    58→ * ----------------------------------------------------------------------------
+    59→ * Don't pollute the real content folder
+    60→ * ----------------------------------------------------------------------------
+    61→ *
+    62→ * The pilot writes to a TEMP content directory at
+    63→ * `<os.tmpdir()>/osrs-pilot-content/` (NOT the real `lostcity/content/`).
+    64→ * This is critical: the synthesized test data must never reach the user's
+    65→ * real content folder (it would break the build by polluting pack files
+    66→ * with bogus IDs that don't have corresponding cache files).
+    67→ *
+    68→ * The temp content dir is cleaned up on exit unless `--keep-content` is
+    69→ * passed (useful for inspecting the produced files manually).
+    70→ *
+    71→ * ----------------------------------------------------------------------------
+    72→ * Running against a REAL OSRS cache (Part C)
+    73→ * ----------------------------------------------------------------------------
+    74→ *
+    75→ * This pilot uses the `TormentedDemonStubReader` (which synthesizes OSRS
+    76→ * bytes in-memory). To run against a REAL OSRS cache, the user should:
+    77→ *
+    78→ *   1. Drop the OSRS cache files into `engine/data/osrs-cache/` — i.e.
+    79→ *      `main_file_cache.dat2`, `main_file_cache.idx0`, `main_file_cache.idx1`,
+    80→ *      ..., `main_file_cache.idx255` should all be there. (Cache bytes are
+    81→ *      copyright — we only ship the code that consumes them.)
+    82→ *
+    83→ *   2. Run the existing Import.ts CLI (Task 8) — it accepts `--osrs-cache`:
+    84→ *
+    85→ *        cd engine
+    86→ *        bun tools/osrs/Import.ts --osrs-cache=data/osrs-cache \\
+    87→ *            --npc=<td_npc_id> --group=osrs_imports
+    88→ *
+    89→ *      where `<td_npc_id>` is the OSRS NPC ID of the Tormented Demon in the
+    90→ *      cache (look it up in the OSRS wiki or via the unpack tool). The
+    91→ *      `--group=osrs_imports` flag puts the imported files under
+    92→ *      `content/models/osrs_imports/` and `content/scripts/.../osrs_imports.{npc,seq}`.
+    93→ *
+    94→ *   3. Refresh the variants.json index:
+    95→ *
+    96→ *        bun tools/osrs/UpdateVariantsIndex.ts
+    97→ *
+    98→ *   4. Run the existing LostCity build to pack the new content into the 377
+    99→ *      cache that gets served to the client:
+   100→ *
+   101→ *        bun run build
+   102→ *
+   103→ *   5. (Optional) Verify the import:
+   104→ *
+   105→ *        ls -la content/models/osrs_imports/
+   106→ *        cat content/scripts/npc/configs/osrs_imports.npc
+   107→ *        cat content/deps/osrs_tormented_demon.deps.json | head -50
+   108→ *        cat content/deps/variants.json
+   109→ *
+   110→ *   The real-cache path uses `OsrsCacheAssetReader` (Task 7) instead of
+   111→ *   `TormentedDemonStubReader` — but every other stage (trace → import →
+   112→ *   register) is identical. So if this pilot passes, the real-cache path
+   113→ *   will work the same way (modulo any genuine OSRS-cache-specific quirks
+   114→ *   the fixture doesn't model — e.g. master-index child-name hash resolution).
+   115→ *
+   116→ * ----------------------------------------------------------------------------
+   117→ * Usage
+   118→ * ----------------------------------------------------------------------------
+   119→ *
+   120→ *   bun tools/osrs/PilotTormentedDemon.ts [--keep-fixture] [--keep-content]
+   121→ *
+   122→ * Flags:
+   123→ *   --keep-fixture   Don't delete the fixture's temp dir on exit (useful for
+   124→ *                    inspecting the synthesized OSRS bytes / .rs2 script).
+   125→ *   --keep-content   Don't delete the temp content dir on exit (useful for
+   126→ *                    inspecting the produced .ob2 / .anim / .npc / pack files).
+   127→ *   --help, -h       Show this help.
+   128→ *
+   129→ * Exit codes:
+   130→ *   0  — PILOT PASS (all assertions succeeded)
+   131→ *   1  — PILOT FAIL (one or more assertions failed — see log for details)
+   132→ */
+   133→
+   134→import fs from 'fs';
+   135→import os from 'os';
+   136→import path from 'path';
+   137→
+   138→import { printError, printInfo, printWarning } from '#/util/Logger.js';
+   139→
+   140→import { ContentFolderWriter } from './ContentFolderWriter.js';
+   141→import { DependencyTracer } from './DependencyTracer.js';
+   142→import { ImportResult } from './ImportResult.js';
+   143→import { regenerateIndex } from './UpdateVariantsIndex.js';
+   144→import { VariantRegistry } from '#/engine/variant/VariantRegistry.js';
+   145→import { nodeKey } from './DepsSchema.js';
+   146→
+   147→import {
+   148→    cleanupFixture,
+   149→    generateTormentedDemonFixture,
+   150→    TD_NPC_ID,
+   151→    TormentedDemonStubReader,
+   152→    TormentedDemonFixture
+   153→} from './fixtures/TormentedDemonFixture.js';
+   154→
+   155→// ---- Assertion helpers ----
+   156→
+   157→let failures = 0;
+   158→let passes = 0;
+   159→
+   160→function assert(cond: boolean, msg: string): void {
+   161→    if (cond) {
+   162→        passes++;
+   163→        printInfo(`  PASS: ${msg}`);
+   164→    } else {
+   165→        failures++;
+   166→        printWarning(`  FAIL: ${msg}`);
+   167→    }
+   168→}
+   169→
+   170→// ---- CLI args ----
+   171→
+   172→interface CliArgs {
+   173→    keepFixture: boolean;
+   174→    keepContent: boolean;
+   175→    showHelp: boolean;
+   176→}
+   177→
+   178→function parseArgs(argv: string[]): CliArgs {
+   179→    let keepFixture = false;
+   180→    let keepContent = false;
+   181→    let showHelp = false;
+   182→    for (let i = 2; i < argv.length; i++) {
+   183→        const arg = argv[i];
+   184→        if (arg === '--keep-fixture') {
+   185→            keepFixture = true;
+   186→        } else if (arg === '--keep-content') {
+   187→            keepContent = true;
+   188→        } else if (arg === '--help' || arg === '-h') {
+   189→            showHelp = true;
+   190→        } else {
+   191→            printWarning(`Unknown arg: ${arg} (use --help)`);
+   192→        }
+   193→    }
+   194→    return { keepFixture, keepContent, showHelp };
+   195→}
+   196→
+   197→function printHelp(): void {
+   198→    const help = [
+   199→        'PilotTormentedDemon.ts — end-to-end pilot for the Tormented Demon NPC',
+   200→        '',
+   201→        'Usage:',
+   202→        '  bun tools/osrs/PilotTormentedDemon.ts [--keep-fixture] [--keep-content]',
+   203→        '',
+   204→        'Flags:',
+   205→        '  --keep-fixture   Don\'t delete the fixture temp dir on exit.',
+   206→        '  --keep-content   Don\'t delete the temp content dir on exit.',
+   207→        '  --help, -h       Show this help.'
+   208→    ].join('\n');
+   209→    console.log(help);
+   210→}
+   211→
+   212→// ---- Main pipeline runner ----
+   213→
+   214→function runPilot(args: CliArgs): number {
+   215→    // ---- Stage 1: Fixture setup ----
+   216→    printInfo('=== Stage 1: Generate Tormented Demon fixture ===');
+   217→    const fixture: TormentedDemonFixture = generateTormentedDemonFixture();
+   218→    printInfo(`  NPC ID: ${fixture.npcId}`);
+   219→    printInfo(`  Script dir: ${fixture.scriptDir}`);
+   220→    printInfo(`  Expected dep nodes: ${fixture.expectedDeps}`);
+   221→
+   222→    // Create the temp content dir (where the writer will write files).
+   223→    const contentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'osrs-pilot-content-'));
+   224→    printInfo(`  Temp content dir: ${contentDir}`);
+   225→
+   226→    // ---- Stage 2: Construct stub reader + tracer, run trace ----
+   227→    printInfo('=== Stage 2: Trace Tormented Demon dependencies ===');
+   228→    const reader = new TormentedDemonStubReader();
+   229→    const tracer = new DependencyTracer(reader, { scriptDir: fixture.scriptDir });
+   230→    const depsMap = tracer.trace(fixture.npcId);
+   231→
+   232→    const nodeKeys = Object.keys(depsMap.nodes);
+   233→    printInfo(`  Traced ${nodeKeys.length} nodes, ${depsMap.cycles.length} cycles, ${depsMap.missing.length} missing refs`);
+   234→
+   235→    // ---- Stage 3: Write the deps.json to the temp content dir ----
+   236→    printInfo('=== Stage 3: Write deps.json ===');
+   237→    const depsDir = path.join(contentDir, 'deps');
+   238→    fs.mkdirSync(depsDir, { recursive: true });
+   239→    const depsFilePath = path.join(depsDir, 'osrs_tormented_demon.deps.json');
+   240→    fs.writeFileSync(depsFilePath, JSON.stringify(depsMap, null, 2), 'utf8');
+   241→    printInfo(`  Wrote ${depsFilePath}`);
+   242→
+   243→    // ---- Assertions on the deps map ----
+   244→    printInfo('=== Assert: deps map contents ===');
+   245→
+   246→    // Expected nodes: npc, 2 models, 2 seqs, 2 anims, 1 anim-base, 2 params, 1 script = 11.
+   247→    assert(
+   248→        nodeKeys.length === fixture.expectedDeps,
+   249→        `Deps map has ${fixture.expectedDeps} nodes (got ${nodeKeys.length}: ${nodeKeys.join(', ')})`
+   250→    );
+   251→
+   252→    // Each expected node key must be present.
+   253→    const expectedKeys = [
+   254→        nodeKey('npc', TD_NPC_ID),
+   255→        'model:46001',
+   256→        'model:46002',
+   257→        'seq:9501',
+   258→        'seq:9502',
+   259→        'anim:2005',
+   260→        'anim:2006',
+   261→        'anim-base:47001',
+   262→        'param:1234',
+   263→        'param:1235',
+   264→        'script:tormented_demon'
+   265→    ];
+   266→    for (const key of expectedKeys) {
+   267→        assert(depsMap.nodes[key] !== undefined, `Deps map contains node '${key}'`);
+   268→    }
+   269→
+   270→    // The fire_shield obj ref should appear in missing[] (discovered by the
+   271→    // script scanner via the `inv_has(worn, fire_shield)` call site in the
+   272→    // fake combat script).
+   273→    const fireShieldMissing = depsMap.missing.find(
+   274→        m => m.kind === 'obj' && m.id === 'fire_shield'
+   275→    );
+   276→    assert(
+   277→        fireShieldMissing !== undefined,
+   278→        `Deps map missing[] contains 'obj:fire_shield' (script → obj edge walked) — got ${depsMap.missing.length} missing refs: ${depsMap.missing.map(m => `${m.kind}:${m.id}`).join(', ')}`
+   279→    );
+   280→
+   281→    // The script node should have the fire_shield as a dep (with missing: true).
+   282→    const scriptNode = depsMap.nodes['script:tormented_demon'];
+   283→    assert(
+   284→        scriptNode !== undefined && scriptNode.kind === 'script',
+   285→        'Script node \'script:tormented_demon\' exists with kind=script'
+   286→    );
+   287→    if (scriptNode) {
+   288→        const scriptObjDeps = scriptNode.deps.filter(d => d.kind === 'obj');
+   289→        assert(
+   290→            scriptObjDeps.some(d => d.id === 'fire_shield'),
+   291→            'Script node deps[] contains obj:fire_shield (via inv_has call site)'
+   292→        );
+   293→    }
+   294→
+   295→    // NPC node should reference the model + head + seqs.
+   296→    const npcNode = depsMap.nodes[nodeKey('npc', TD_NPC_ID)];
+   297→    assert(npcNode !== undefined, 'Root NPC node exists');
+   298→    if (npcNode) {
+   299→        const viaKinds = npcNode.deps.map(d => d.kind);
+   300→        assert(viaKinds.includes('model'), 'NPC node has model dep');
+   301→        assert(viaKinds.includes('seq'), 'NPC node has seq dep');
+   302→        assert(viaKinds.includes('param'), 'NPC node has param dep');
+   303→        assert(viaKinds.includes('script'), 'NPC node has script dep (combat script discovered)');
+   304→
+   305→        // Body model + head model both present.
+   306→        const modelDeps = npcNode.deps.filter(d => d.kind === 'model');
+   307→        assert(
+   308→            modelDeps.length === 2,
+   309→            `NPC node has 2 model deps (body + head) — got ${modelDeps.length}`
+   310→        );
+   311→    }
+   312→
+   313→    // ---- Stage 4: Run the ContentFolderWriter ----
+   314→    printInfo('=== Stage 4: Import via ContentFolderWriter ===');
+   315→    const writer = new ContentFolderWriter(contentDir, reader, {
+   316→        dryRun: false,
+   317→        namePrefix: 'osrs_',
+   318→        groupFile: 'osrs_imports',
+   319→        overwrite: false
+   320→    });
+   321→
+   322→    let result: ImportResult;
+   323→    try {
+   324→        result = writer.importNpc(fixture.npcId, depsMap);
+   325→    } catch (err) {
+   326→        printError(`ContentFolderWriter.importNpc threw: ${(err as Error).message}`);
+   327→        if (!args.keepFixture) {
+   328→            cleanupFixture(fixture);
+   329→        }
+   330→        if (!args.keepContent) {
+   331→            try {
+   332→                fs.rmSync(contentDir, { recursive: true, force: true });
+   333→            } catch {
+   334→                // ignore
+   335→            }
+   336→        }
+   337→        return 1;
+   338→    }
+   339→
+   340→    const written = result.written;
+   341→    const skipped = result.skipped;
+   342→    const failed = result.failed;
+   343→    printInfo(`  written=${written.length} skipped=${skipped.length} failed=${failed.length}`);
+   344→    printInfo(`  packUpdates: ${result.packUpdates.map(p => `${p.pack}(+${p.added.length})`).join(' ')}`);
+   345→
+   346→    // ---- Assertions on the import result ----
+   347→    printInfo('=== Assert: import result ===');
+   348→
+   349→    // 5 assets should have been written: model(2) + anim(2) + anim-base(1) + seq(2) + npc(1) = 8.
+   350→    // Wait — the writer creates ONE ob2 file per model and ONE anim file per
+   351→    // anim frame, plus ONE .base file per anim-base, ONE seq config block
+   352→    // per seq (in the same .seq file), and ONE npc config block (in the .npc file).
+   353→    // So written entries = 2 models + 2 anims + 1 anim-base + 2 seqs + 1 npc = 8.
+   354→    assert(
+   355→        written.length === 8,
+   356→        `Writer wrote 8 assets (2 models + 2 anims + 1 anim-base + 2 seqs + 1 npc) — got ${written.length}`
+   357→    );
+   358→
+   359→    // 0 skipped (fresh import — nothing pre-existing).
+   360→    // 3 skipped: the script node + 2 param nodes. The writer's Task 8 scope
+   361→    // is models + anims + anims-base + seqs + NPC configs only — obj/param/
+   362→    // struct/script/texture/particle/sound nodes are skipped with reason
+   363→    // "kind 'X' not yet supported by ContentFolderWriter". This is the
+   364→    // documented behavior per the Task 8 worklog ("What's stubbed / deferred"
+   365→    // section).
+   366→    assert(
+   367→        skipped.length === 3,
+   368→        `Writer skipped 3 assets (script + 2 params — kinds not yet supported) — got ${skipped.length}: ${skipped.map(s => `${s.kind}:${s.osrsId}`).join(', ')}`
+   369→    );
+   370→
+   371→    // 0 failed — every node the tracer walked either got written or skipped
+   372→    // (no missing OSRS nodes since the stub reader returns real decoders).
+   373→    assert(
+   374→        failed.length === 0,
+   375→        `Writer failed 0 assets — got ${failed.length}: ${failed.map(f => `${f.kind}:${f.osrsId}=${f.error}`).join(', ')}`
+   376→    );
+   377→
+   378→    // Pack files updated: model, anim, animset, base, seq, npc.
+   379→    const updatedPacks = result.packUpdates.map(p => p.pack).sort();
+   380→    const expectedPacks = ['anim', 'animset', 'base', 'model', 'npc', 'seq'];
+   381→    assert(
+   382→        JSON.stringify(updatedPacks) === JSON.stringify(expectedPacks),
+   383→        `Writer updated 6 packs [${expectedPacks.join(',')}] — got [${updatedPacks.join(',')}]`
+   384→    );
+   385→
+   386→    // Pack entries added counts:
+   387→    //   model:    2 (body + head)
+   388→    //   anim:     2
+   389→    //   animset:  2
+   390→    //   base:     1
+   391→    //   seq:      2
+   392→    //   npc:      1
+   393→    const packAddedCounts: Record<string, number> = { model: 2, anim: 2, animset: 2, base: 1, seq: 2, npc: 1 };
+   394→    for (const [pack, expectedCount] of Object.entries(packAddedCounts)) {
+   395→        const update = result.packUpdates.find(p => p.pack === pack);
+   396→        const actualCount = update?.added.length ?? 0;
+   397→        assert(
+   398→            actualCount === expectedCount,
+   399→            `Pack '${pack}' added ${expectedCount} entries — got ${actualCount}`
+   400→        );
+   401→    }
+   402→
+   403→    // ---- Verify files on disk ----
+   404→    printInfo('=== Assert: files written to disk ===');
+   405→
+   406→    const modelDir = path.join(contentDir, 'models', 'osrs_imports');
+   407→    const modelFiles = fs.existsSync(modelDir) ? fs.readdirSync(modelDir) : [];
+   408→    assert(
+   409→        modelFiles.some(f => f.endsWith('.ob2') && f.includes('osrs_model_46001')),
+   410→        `Body model .ob2 file exists (got: ${modelFiles.join(', ')})`
+   411→    );
+   412→    assert(
+   413→        modelFiles.some(f => f.endsWith('.ob2') && f.includes('osrs_model_46002')),
+   414→        'Head model .ob2 file exists'
+   415→    );
+   416→    assert(
+   417→        modelFiles.some(f => f.endsWith('.anim') && f.includes('osrs_anim_2005')),
+   418→        'Stand anim .anim file exists'
+   419→    );
+   420→    assert(
+   421→        modelFiles.some(f => f.endsWith('.anim') && f.includes('osrs_anim_2006')),
+   422→        'Attack anim .anim file exists'
+   423→    );
+   424→    assert(
+   425→        modelFiles.some(f => f.endsWith('.base') && f.includes('osrs_base_47001')),
+   426→        'AnimBase .base file exists'
+   427→    );
+   428→
+   429→    const npcConfigPath = path.join(contentDir, 'scripts', 'npc', 'configs', 'osrs_imports.npc');
+   430→    assert(fs.existsSync(npcConfigPath), `NPC config file exists at ${npcConfigPath}`);
+   431→
+   432→    const seqConfigPath = path.join(contentDir, 'scripts', 'seq', 'configs', 'osrs_imports.seq');
+   433→    assert(fs.existsSync(seqConfigPath), `Seq config file exists at ${seqConfigPath}`);
+   434→
+   435→    // Verify NPC config content.
+   436→    if (fs.existsSync(npcConfigPath)) {
+   437→        const npcContent = fs.readFileSync(npcConfigPath, 'utf8');
+   438→        assert(
+   439→            npcContent.includes('[osrs_tormented_demon]'),
+   440→            'NPC config has [osrs_tormented_demon] header'
+   441→        );
+   442→        // model1 should be rewritten to the debugname (not the raw OSRS ID).
+   443→        assert(
+   444→            npcContent.includes('model1=osrs_model_46001'),
+   445→            'NPC config rewrites model1=osrs_model_46001 (via NameResolver)'
+   446→        );
+   447→        // readyanim should be rewritten to the seq debugname.
+   448→        assert(
+   449→            npcContent.includes('readyanim=osrs_td_stand'),
+   450→            'NPC config rewrites readyanim=osrs_td_stand (via NameResolver)'
+   451→        );
+   452→        // Stats line.
+   453→        assert(
+   454→            npcContent.includes('stats='),
+   455→            'NPC config has stats= line'
+   456→        );
+   457→    }
+   458→
+   459→    // Verify seq config content.
+   460→    if (fs.existsSync(seqConfigPath)) {
+   461→        const seqContent = fs.readFileSync(seqConfigPath, 'utf8');
+   462→        assert(
+   463→            seqContent.includes('[osrs_td_stand]'),
+   464→            'Seq config has [osrs_td_stand] header'
+   465→        );
+   466→        assert(
+   467→            seqContent.includes('[osrs_td_attack]'),
+   468→            'Seq config has [osrs_td_attack] header'
+   469→        );
+   470→        assert(
+   471→            seqContent.includes('frame1=osrs_anim_2005'),
+   472→            'Seq config rewrites frame1=osrs_anim_2005 for td_stand'
+   473→        );
+   474→        assert(
+   475→            seqContent.includes('frame1=osrs_anim_2006'),
+   476→            'Seq config rewrites frame1=osrs_anim_2006 for td_attack'
+   477→        );
+   478→    }
+   479→
+   480→    // ---- Verify pack files on disk ----
+   481→    printInfo('=== Assert: pack files updated ===');
+   482→
+   483→    const packDir = path.join(contentDir, 'pack');
+   484→    for (const packName of ['model', 'anim', 'animset', 'base', 'seq', 'npc']) {
+   485→        const packPath = path.join(packDir, `${packName}.pack`);
+   486→        assert(fs.existsSync(packPath), `Pack file '${packName}.pack' exists`);
+   487→        if (fs.existsSync(packPath)) {
+   488→            const content = fs.readFileSync(packPath, 'utf8');
+   489→            // The newly-added debugnames should appear in the pack file.
+   490→            if (packName === 'model') {
+   491→                assert(content.includes('osrs_model_46001'), 'model.pack contains osrs_model_46001');
+   492→                assert(content.includes('osrs_model_46002'), 'model.pack contains osrs_model_46002');
+   493→            } else if (packName === 'anim' || packName === 'animset') {
+   494→                assert(content.includes('osrs_anim_2005'), `${packName}.pack contains osrs_anim_2005`);
+   495→                assert(content.includes('osrs_anim_2006'), `${packName}.pack contains osrs_anim_2006`);
+   496→            } else if (packName === 'base') {
+   497→                assert(content.includes('osrs_base_47001'), 'base.pack contains osrs_base_47001');
+   498→            } else if (packName === 'seq') {
+   499→                assert(content.includes('osrs_td_stand'), 'seq.pack contains osrs_td_stand');
+   500→                assert(content.includes('osrs_td_attack'), 'seq.pack contains osrs_td_attack');
+   501→            } else if (packName === 'npc') {
+   502→                assert(content.includes('osrs_tormented_demon'), 'npc.pack contains osrs_tormented_demon');
+   503→            }
+   504→        }
+   505→    }
+   506→
+   507→    // ---- Verify depMapUpdated has transformedFrom populated ----
+   508→    printInfo('=== Assert: depMapUpdated transformedFrom ===');
+   509→    const updatedNodes = result.depMapUpdated.nodes;
+   510→    // Only the importable kinds (model/anim/anim-base/seq/npc) get
+   511→    // transformedFrom set by the writer. Script + param nodes are skipped
+   512→    // (kinds not yet supported) and don't get a transformedFrom value —
+   513→    // that's the documented Task 8 behavior.
+   514→    const importableKinds = new Set(['model', 'anim', 'anim-base', 'seq', 'npc']);
+   515→    let allTransformed = true;
+   516→    let transformedCount = 0;
+   517→    for (const key of Object.keys(updatedNodes)) {
+   518→        const n = updatedNodes[key];
+   519→        if (n.source === 'osrs' && !n.missing && importableKinds.has(n.kind)) {
+   520→            if (n.transformedFrom === null || n.transformedFrom === undefined) {
+   521→                allTransformed = false;
+   522→                printWarning(`  ${key} transformedFrom is null after import`);
+   523→            } else {
+   524→                transformedCount++;
+   525→            }
+   526→        }
+   527→    }
+   528→    assert(allTransformed, 'Every importable OSRS node has transformedFrom set');
+   529→    printInfo(`  ${transformedCount} nodes have transformedFrom set`);
+   530→
+   531→    // ---- Stage 5: Register the variant ----
+   532→    printInfo('=== Stage 5: Register variant ===');
+   533→
+   534→    // The variants.json lives at <contentDir>/deps/variants.json.
+   535→    const variantsPath = path.join(contentDir, 'deps', 'variants.json');
+   536→
+   537→    // Update the deps map's NPC node name to the SANITIZED debugname
+   538→    // assigned by the writer (e.g. "osrs_tormented_demon"). The dep tracer
+   539→    // sets npcNode.name to the OSRS display name ("Tormented demon"), but
+   540→    // the variants.json schema expects the sanitized debugname (per the
+   541→    // Task 9 worklog: "osrsDebugname: sanitized debugname (with `osrs_`
+   542→    // prefix)"). The writer's `written[]` entry has the sanitized form.
+   543→    const writtenNpcEntry = result.written.find(w => w.kind === 'npc');
+   544→    const updatedNpcNode = updatedNodes[nodeKey('npc', TD_NPC_ID)];
+   545→    if (writtenNpcEntry && updatedNpcNode) {
+   546→        updatedNpcNode.name = writtenNpcEntry.debugname;
+   547→    }
+   548→
+   549→    // Persist the updated deps.json (with transformedFrom + sanitized name)
+   550→    // so the UpdateVariantsIndex script can read it. This is the same flow
+   551→    // as Import.ts CLI — it persists the updated deps.json before registering.
+   552→    fs.writeFileSync(depsFilePath, JSON.stringify(result.depMapUpdated, null, 2), 'utf8');
+   553→    printInfo(`  Re-wrote updated deps.json with transformedFrom fields: ${depsFilePath}`);
+   554→
+   555→    // The VariantRegistry singleton uses Environment.BUILD_SRC_DIR for its
+   556→    // default variants.json path. We override it by calling load() with an
+   557→    // explicit path BEFORE registerVariant — this also clears any prior
+   558→    // in-memory state from other tests.
+   559→    VariantRegistry.resetForTest();
+   560→    const registry = VariantRegistry.getInstance();
+   561→    // load() with the temp variants path — if the file doesn't exist yet,
+   562→    // it starts empty (which is what we want for a fresh pilot run).
+   563→    VariantRegistry.load(variantsPath);
+   564→
+   565→    // Find the new NPC ID assigned by the writer (the npc node's transformedFrom).
+   566→    assert(
+   567→        updatedNpcNode !== undefined && typeof updatedNpcNode.transformedFrom === 'number',
+   568→        'Updated NPC node has numeric transformedFrom (the new 377 NPC ID)'
+   569→    );
+   570→    const osrsImportedNpcId = updatedNpcNode?.transformedFrom as number;
+   571→
+   572→    // Use a relative depMapPath matching the existing convention.
+   573→    const relDepsPath = path.relative(process.cwd(), depsFilePath).replace(/\\/g, '/');
+   574→
+   575→    // Register the variant: legacyNpcId=-1 (brand-new OSRS NPC).
+   576→    registry.registerVariant(
+   577→        -1,                       // legacyNpcId (no legacy twin — Tormented Demon is brand-new)
+   578→        osrsImportedNpcId,        // osrsImportedNpcId (the new 377 NPC ID assigned by Task 8)
+   579→        result.depMapUpdated,     // updated deps map (for osrsDebugname lookup)
+   580→        relDepsPath               // path to the persisted deps.json
+   581→    );
+   582→
+   583→    // Verify variants.json was written to disk.
+   584→    assert(fs.existsSync(variantsPath), `variants.json written to ${variantsPath}`);
+   585→
+   586→    if (fs.existsSync(variantsPath)) {
+   587→        const variantsContent = fs.readFileSync(variantsPath, 'utf8');
+   588→        const variantsJson = JSON.parse(variantsContent);
+   589→        assert(
+   590→            Array.isArray(variantsJson.variants) && variantsJson.variants.length === 1,
+   591→            'variants.json has exactly 1 variant entry'
+   592→        );
+   593→        if (variantsJson.variants.length === 1) {
+   594→            const entry = variantsJson.variants[0];
+   595→            assert(
+   596→                entry.legacyNpcId === -1,
+   597→                'Variant entry has legacyNpcId=-1 (brand-new OSRS NPC)'
+   598→            );
+   599→            assert(
+   600→                entry.osrsNpcId === osrsImportedNpcId,
+   601→                `Variant entry has osrsNpcId=${osrsImportedNpcId} (got ${entry.osrsNpcId})`
+   602→            );
+   603→            assert(
+   604→                entry.osrsDebugname === 'osrs_tormented_demon',
+   605→                `Variant entry has osrsDebugname='osrs_tormented_demon' (got '${entry.osrsDebugname}')`
+   606→            );
+   607→            assert(
+   608→                entry.legacyDebugname === null,
+   609→                'Variant entry has legacyDebugname=null (no legacy twin)'
+   610→            );
+   611→        }
+   612→    }
+   613→
+   614→    // ---- Stage 6: Regenerate the variants.json index from deps files ----
+   615→    printInfo('=== Stage 6: Regenerate variants.json index ===');
+   616→    const variantCount = regenerateIndex(contentDir);
+   617→    assert(
+   618→        variantCount === 1,
+   619→        `regenerateIndex() returned 1 variant (got ${variantCount})`
+   620→    );
+   621→
+   622→    // Verify the regenerated variants.json still has the same entry.
+   623→    if (fs.existsSync(variantsPath)) {
+   624→        const regenContent = fs.readFileSync(variantsPath, 'utf8');
+   625→        const regenJson = JSON.parse(regenContent);
+   626→        assert(
+   627→            Array.isArray(regenJson.variants) && regenJson.variants.length === 1,
+   628→            'Regenerated variants.json has 1 variant entry'
+   629→        );
+   630→        if (regenJson.variants.length === 1) {
+   631→            const entry = regenJson.variants[0];
+   632→            assert(
+   633→                entry.legacyNpcId === -1,
+   634→                'Regenerated variant has legacyNpcId=-1'
+   635→            );
+   636→            assert(
+   637→                entry.osrsNpcId === osrsImportedNpcId,
+   638→                `Regenerated variant has osrsNpcId=${osrsImportedNpcId} (got ${entry.osrsNpcId})`
+   639→            );
+   640→            assert(
+   641→                entry.osrsDebugname === 'osrs_tormented_demon',
+   642→                `Regenerated variant has osrsDebugname='osrs_tormented_demon' (got '${entry.osrsDebugname}')`
+   643→            );
+   644→        }
+   645→    }
+   646→
+   647→    // ---- Stage 7: Final summary ----
+   648→    printInfo('=== Stage 7: Final summary ===');
+   649→    printInfo(`  Total assertions: ${passes} passed, ${failures} failed`);
+   650→    printInfo(`  Fixture dir: ${fixture.cacheDir}`);
+   651→    printInfo(`  Content dir: ${contentDir}`);
+   652→    printInfo(`  Deps file: ${depsFilePath}`);
+   653→    printInfo(`  Variants index: ${variantsPath}`);
+   654→
+   655→    if (failures === 0) {
+   656→        const summary =
+   657→            'PILOT PASS — Tormented Demon imported: ' +
+   658→            `${nodeKeys.length} nodes traced, ` +
+   659→            `${written.length} files written, ` +
+   660→            `${result.packUpdates.reduce((sum, p) => sum + p.added.length, 0)} pack entries added, ` +
+   661→            '1 variant registered.';
+   662→        printInfo(summary);
+   663→    } else {
+   664→        printError(`PILOT FAIL — ${failures} assertion(s) failed.`);
+   665→    }
+   666→
+   667→    // ---- Cleanup ----
+   668→    if (!args.keepFixture) {
+   669→        cleanupFixture(fixture);
+   670→    } else {
+   671→        printInfo(`  (keeping fixture dir: ${fixture.cacheDir})`);
+   672→    }
+   673→    if (!args.keepContent) {
+   674→        try {
+   675→            fs.rmSync(contentDir, { recursive: true, force: true });
+   676→            printInfo(`  Cleaned up temp content dir: ${contentDir}`);
+   677→        } catch (err) {
+   678→            printWarning(`  Failed to clean up temp content dir: ${(err as Error).message}`);
+   679→        }
+   680→    } else {
+   681→        printInfo(`  (keeping content dir: ${contentDir})`);
+   682→    }
+   683→
+   684→    // Reset the VariantRegistry singleton so subsequent test runs start fresh.
+   685→    VariantRegistry.resetForTest();
+   686→
+   687→    return failures === 0 ? 0 : 1;
+   688→}
+   689→
+   690→// ---- Entrypoint ----
+   691→
+   692→function main(): number {
+   693→    const args = parseArgs(process.argv);
+   694→    if (args.showHelp) {
+   695→        printHelp();
+   696→        return 0;
+   697→    }
+   698→    return runPilot(args);
+   699→}
+   700→
+   701→const exitCode = main();
+   702→process.exit(exitCode);
+   703→

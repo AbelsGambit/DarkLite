@@ -1,0 +1,1289 @@
+     1→# LostCity 377 → OSRS Model Pipeline — Worklog
+     2→
+     3→This file is the **single shared worklog** for the OSRS model upgrade project.
+     4→All subagents MUST read this before working and append (never overwrite) their
+     5→own section using the template in the parent prompt.
+     6→
+     7→---
+     8→
+     9→## Project context (read this first)
+    10→
+    11→**Goal**: Patch the user's LostCity 377-branch project (`engine-ts`, `java-client`,
+    12→`content`) so it can render *newer OSRS models* alongside the existing 377-era
+    13→models, with a modular selector so players can pick which version they see.
+    14→Backwards compatibility must be preserved at every step.
+    15→
+    16→**Pilot NPC**: Tormented Demon (new model, no 377 equivalent).
+    17→**Tricky test**: Kalphite Queen (two forms, form-swap dependencies).
+    18→
+    19→**Repos on disk** (extracted from user RAR):
+    20→- `/home/z/my-project/lostcity/engine`   — TypeScript engine (`engine-ts`, Bun)
+    21→- `/home/z/my-project/lostcity/client`   — Java client (gradle, obfuscated)
+    22→- `/home/z/my-project/lostcity/content`  — LostCity-style content folder
+    23→
+    24→**OSRS cache source**: User must supply (drop into
+    25→`/home/z/my-project/lostcity/engine/data/osrs-cache/`). Cache bytes are
+    26→copyright — we only write the code that *consumes* them, never redistribute.
+    27→Pilot assumes an OSRS cache from after the *While Guthix Sleeps* quest
+    28→(Nov 2024 OSRS update) which is when the Tormented Demon was re-added.
+    29→
+    30→## Architecture findings (from codebase exploration)
+    31→
+    32→### Engine side (TypeScript, `engine-ts`)
+    33→- **Cache reader**: `engine/src/io/FileStream.ts` — 255-archive file store
+    34→  (archives 0..4). `read(archive, file, decompress)` / `write(...)`.
+    35→  Archives: 0=versionlist/jagfiles, 1=models, 2=anims, 3=midi, 4=map.
+    36→- **OnDemand**: `engine/src/engine/OnDemand.ts` — serves cache files to client
+    37→  over the game socket. Three priority queues (urgent/extra/ingame).
+    38→- **Model decoder**: `engine/src/cache/graphics/Model.ts` — 377-format reader.
+    39→  Reads 18-byte trailer (vertexCount, faceCount, texturedFaceCount, flags,
+    40→  data lengths), then decodes vertices/faces/textures.
+    41→- **Anim decoder**: `engine/src/cache/graphics/AnimFrame.ts` + `AnimBase.ts` —
+    42→  reads 377 anim frames (4 sections: head/tran1/tran2/del + base data).
+    43→- **Config decoders**: `engine/src/cache/config/*.ts` — NpcType, SeqType,
+    44→  ObjType, etc. Each has a `decode(code, dat)` opcode switch.
+    45→- **Pack files**: `content/pack/*.pack` — hand-maintained `id=name` maps:
+    46→  `npc.pack`, `model.pack`, `anim.pack`, `seq.pack`, etc.
+    47→- **Pack tooling**: `engine/tools/pack/PackFileBase.ts` — `PackFile` class
+    48→  with `register(id, name)`, `getByName(name)`, `save()`.
+    49→  `engine/tools/pack/graphics/pack.ts` writes models (`.ob2`) and anims
+    50→  (`.anim`) from content folder into `data/pack` cache, gzipped.
+    51→- **Config build**: `engine/tools/pack/config/NpcConfig.ts` etc — compiles
+    52→  `[debugname]` ini-style configs into `npc.dat`/`npc.idx` for client.
+    53→- **Content layout**: `content/{models,pack,scripts,...}`. NPC combat scripts
+    54→  live in `content/scripts/npc/scripts/*.rs2` (runescript), NPC configs in
+    55→  `content/scripts/npc/configs/*.npc`. Params in `content/scripts/npc/configs/npc.param`.
+    56→
+    57→### Client side (Java, obfuscated)
+    58→- **Model decoder**: `client/src/main/java/jagex2/dash3d/Model.java` (2018 lines).
+    59→  `Metadata` class holds offsets; `Model(int id, int unused)` constructor
+    60→  decodes vertex/face arrays. `Model.method357(byte[] data, int id, byte 7)`
+    61→  populates `Metadata` from the 18-byte trailer.
+    62→- **AnimBase/AnimFrame**: `client/src/main/java/jagex2/dash3d/` — mirrors the
+    63→  TS engine decoders.
+    64→- **NpcType**: `client/src/main/java/jagex2/config/NpcType.java` — opcode-based
+    65→  decoder matching the 377 opcode set (codes 1..107).
+    66→- **OnDemand fetcher**: `client/src/main/java/jagex2/io/OnDemand*.java`.
+    67→
+    68→### Format diff: 377 vs OSRS (key for the port)
+    69→The OSRS model format is a **strict superset** of the 377 format:
+    70→- Header trailer is 18 bytes in 377, **23 bytes** in OSRS (extra 5 bytes:
+    71→  `version`, `textureUVCount`, `triangleSkinCount`, `vertexSkinCount`,
+    72→  `maxDepth`).
+    73→- OSRS adds: per-vertex skin data, per-triangle skin data, textured UV coords,
+    74→  `version` byte (used as a feature gate).
+    75→- Old models decode fine under OSRS rules by treating the new fields as
+    76→  zero-length when their flag bytes are 0.
+    77→- Animations changed more substantially: OSRS anim frames use a different
+    78→  layout (no shared `head` block — each frame is self-contained).
+    79→
+    80→### Pack-list format (hand-maintained today)
+    81→Plain text, one entry per line: `0=hans\n1=man\n...`. Generated/validated by
+    82→`PackFile.save()`. We will extend, not replace.
+    83→
+    84→## Plan: 5-stage pipeline
+    85→
+    86→```
+    87→[OSRS cache bytes]
+    88→   │
+    89→   ▼ 1. DECODE    — port RuneLite's ModelDefinition/AnimDefinition to TS
+    90→   ▼ 2. TRACE     — walk dependency graph → deps.json map
+    91→   ▼ 3. TRANSFORM — emit 377-compatible bytes OR teach client new format
+    92→   ▼ 4. PACK      — write into content folder + regenerate pack lists
+    93→   ▼ 5. REGISTER  — modular variant registry, server-side variant storage
+    94→```
+    95→
+    96→## Task ID map
+    97→
+    98→| ID  | Description                                            | Status      |
+    99→|-----|--------------------------------------------------------|-------------|
+   100→| 1   | Extract RAR + inventory tree                           | done        |
+   101→| 2   | Map existing loaders (TS + Java)                       | done        |
+   102→| 3   | Document pack folder + format                          | done        |
+   103→| 4   | worklog init (this file)                               | done        |
+   104→| 5-a | Port OSRS ModelDefinition decoder → TS                 | in progress |
+   105→| 5-b | Port OSRS AnimFrame + AnimBase decoders → TS           | in progress |
+   106→| 5-c | Port OSRS NpcConfig decoder → TS                       | in progress |
+   107→| 6   | Dependency tracer + deps.json schema                   | pending     |
+   108→| 7   | OpenRS2 packing/compression port → TS                  | pending     |
+   109→| 8   | Content-folder writer + auto pack-list generator       | pending     |
+   110→| 9   | Modular variant registry (resolveModel + storage)      | pending     |
+   111→| 10  | End-to-end pilot: Tormented Demon                      | pending     |
+   112→| 11  | Tricky test: Kalphite Queen (2 forms)                  | pending     |
+   113→| 12  | agent-browser + lint verify                            | pending     |
+   114→| 13  | Schedule webDevReview cron (every 15 min)              | pending     |
+   115→
+   116→Tasks 5-a / 5-b / 5-c are parallelizable — they touch independent decoders.
+   117→
+   118→## Output directory convention
+   119→
+   120→All new pipeline code goes under:
+   121→- `/home/z/my-project/lostcity/engine/src/cache/osrs/` — decoders (TS)
+   122→- `/home/z/my-project/lostcity/engine/tools/osrs/` — pipeline tooling
+   123→- `/home/z/my-project/lostcity/content/osrs-import/` — staged OSRS content
+   124→  (each import creates a subfolder: `osrs-import/td-pilot/`, etc.)
+   125→- `/home/z/my-project/lostcity/content/deps/` — dependency maps (`deps.json`)
+   126→
+   127→This keeps new code isolated from existing code paths — nothing in the
+   128→existing build gets touched unless we explicitly wire it in.
+   129→
+   130→---
+   131→
+   132→## Task 5-a — Port OSRS ModelDefinition decoder to TS
+   133→**Agent:** OsrsModelPorter
+   134→**Status:** done
+   135→**Files created** (both under `engine/src/cache/osrs/`):
+   136→- `OsrsModel.ts` (~822 lines incl. extensive comments)
+   137→- `index.ts` (barrel, 2 lines, re-exports default + `OsrsModelMetadata`)
+   138→
+   139→### Summary
+   140→Ported RuneLite's `ModelDefinition.java` to TypeScript as `OsrsModel`, following
+   141→the LostCity conventions used by the existing 377 decoder at
+   142→`engine/src/cache/graphics/Model.ts`. Output uses `Packet` from `#/io/Packet.js`
+   143→for all byte reading, `printWarning` from `#/util/Logger.js` for warnings, and
+   144→the same 4-space / single-quote / semi style as the rest of the engine.
+   145→
+   146→### Public API
+   147→```ts
+   148→class OsrsModel {
+   149→  static decode(id: number, data: Uint8Array | null): OsrsModel | null;
+   150→  static detect(data: Uint8Array): 'osrs' | 'legacy377';
+   151→  toLegacy377(): Uint8Array;
+   152→  // plus public decoded fields (typed arrays) and header counts
+   153→}
+   154→
+   155→class OsrsModelMetadata {
+   156→  // all trailer fields + computed section offsets
+   157→}
+   158→```
+   159→
+   160→The class is **API-compatible in spirit** with the existing 377 `Model` class
+   161→(sibling `Metadata` class + static `decode()`), but the OSRS decoder is
+   162→one-shot (no separate `unpack`/`fromId` split) — it is intended for pipeline
+   163→use (decode → transform → pack), not for runtime client caching. The 377
+   164→decoder's two-stage split was an optimisation for the live game server; the
+   165→OSRS pipeline doesn't need it.
+   166→
+   167→### Spec ambiguities resolved
+   168→
+   169→1. **Trailer byte count.** The task spec listed 12 trailer fields (17 bytes)
+   170→   but asserted the trailer is 23 bytes. Resolved by combining the spec list
+   171→   with the worklog note ("extra 5 bytes: `version`, `textureUVCount`,
+   172→   `triangleSkinCount`, `vertexSkinCount`, `maxDepth`") and keeping every 377
+   173→   field (including `priority`, which the spec omitted). Final layout = 17
+   174→   fields, 23 bytes total. The 5 NEW bytes are: `version`,
+   175→   `hasFaceTextures`, `triangleSkinCount`, `vertexSkinCount`, `maxDepth`
+   176→   (all u8). `textureUVCount` from the worklog is interpreted as the same
+   177→   field as `triangleTextureCount` (the count of textured triangles that
+   178→   carry UVs).
+   179→
+   180→2. **Triangle orientation/type byte.** The spec lists section 11
+   181→   ("triangle vertex indices") as using the "same 1/2/3/4 type encoding as
+   182→   377" but doesn't list a separate orientation section. In 377 the
+   183→   orientation byte lives in its own 1-byte-per-face section read BEFORE
+   184→   the index deltas. Resolved by adding a triangle-orientation section
+   185→   (1 byte per triangle) at body position 5.5 (between vertex labels and
+   186→   triangle colours) — the same role as 377's `faceOrientationsOffset`.
+   187→   The body section order comment in the source makes this explicit.
+   188→
+   189→3. **`priority` byte.** 377 has a `priority` byte (255 = per-face priority
+   190→   array; otherwise shared priority value). The OSRS spec body section
+   191→   list has no priority section, but dropping the byte entirely would lose
+   192→   information needed for the 377 backward-compat path. Kept the byte in
+   193→   the OSRS trailer at the same trailer position as 377 (between
+   194→   `hasFaceTextures` and `hasFaceAlphas`).
+   195→
+   196→4. **Skin section encoding.** Spec body sections 13/14 say "only if
+   197→   `version >= 1` AND skinCount > 0" but don't say how each skin entry is
+   198→   encoded. Chose u8 per entry (matching the modern RuneLite decoder).
+   199→   If a future cache uses smart-encoded skin entries, this is the single
+   200→   line to change.
+   201→
+   202→5. **Detect heuristic.** `detect()` sniffs by reading the version byte at
+   203→   `data.length - 23`, then validates vertexCount/triangleCount/dataLen
+   204→   fields against the blob size. Falls back to `'legacy377'` on any
+   205→   sanity failure — the legacy decoder will then either succeed or report
+   206→   its own error. The safe default prevents false-positive OSRS
+   207→   classification of malformed 377 blobs.
+   208→
+   209→### `toLegacy377()` transform — limitations
+   210→
+   211→The transform emits a faithful 377 `.ob2` blob that the existing Java client
+   212→can render. The following OSRS-only data is **dropped**:
+   213→
+   214→| OSRS field             | 377 equivalent                | Impact |
+   215→|------------------------|-------------------------------|--------|
+   216→| `triangleMaterial`     | none                          | Faces with material textures fall back to flat colour |
+   217→| `triangleSkin`         | none                          | Rig-based triangle skinning lost |
+   218→| `vertexSkin`           | none                          | Rig-based vertex skinning lost |
+   219→| `maxDepth`             | none                          | Bounding-box hint lost (client recomputes) |
+   220→
+   221→The dependency tracer (task 6) MUST flag models that have non-zero
+   222→`triangleSkin`/`vertexSkin` arrays, because animations targeting those rigs
+   223→will not play correctly when the model is rendered as a 377 blob. The pilot
+   224→NPC (Tormented Demon) selection should prefer models with `triangleSkinCount
+   225→== 0 && vertexSkinCount == 0` if any are available.
+   226→
+   227→Round-trip verified by smoke test:
+   228→  OSRS bytes → `OsrsModel.decode()` → `toLegacy377()` → `Model.unpack()`
+   229→  → `Model.fromId()` — all vertex positions, triangle indices, colours,
+   230→  infos, alphas, tags, vertex labels, and per-face/shared priorities
+   231→  match exactly. Textured UV vertex indices also survive (377 has the
+   232→  same field shape — 3 u16 vertex indices per textured triangle).
+   233→
+   234→### Lint
+   235→`bun run lint` reports the same 4 pre-existing errors (in `src/io/Packet.ts`
+   236→— unused `checkcrc` params, unrelated to this task) and 15 pre-existing
+   237→`any` warnings. The two new files (`OsrsModel.ts`, `index.ts`) produce zero
+   238→lint errors and zero warnings. No regression.
+   239→
+   240→### Local helper
+   241→A `psmartSigned(out: number[], value: number)` helper is defined at the
+   242→bottom of `OsrsModel.ts`. LostCity's `Packet.psmart()` only handles
+   243→non-negative values, so a signed-smart encoder was needed for
+   244→`toLegacy377()`. The helper matches `Packet.gsmart()` exactly (1 byte for
+   245→[-64..63], 2 bytes for [-16384..16383]). If this proves generally useful,
+   246→future task should hoist it into `Packet.ts` as `psmartSigned()`.
+   247→
+   248→### Next-action hooks for downstream tasks
+   249→- **Task 6 (dep tracer):** walk `OsrsModel.triangleSkin` and `vertexSkin`
+   250→  arrays; if non-empty, emit a `skins: true` flag in `deps.json` for that
+   251→  model so the pilot can avoid it.
+   252→- **Task 7 (OpenRS2 packing):** when packing an OSRS model that fails
+   253→  `OsrsModel.detect()`, fall back to writing the raw bytes (assume 377).
+   254→- **Task 8 (content-folder writer):** use `OsrsModel.decode(...).toLegacy377()`
+   255→  to emit `.ob2` files into `content/osrs-import/<pilot>/models/`.
+   256→- **Task 9 (variant registry):** the registry's `resolveModel()` should
+   257→  call `OsrsModel.detect()` on candidate bytes to pick the right decoder
+   258→  before caching.
+   259→
+   260→---
+   261→
+   262→## Task 5-b — Port OSRS AnimFrame + SeqType decoders to TS
+   263→**Agent:** OsrsAnimPorter
+   264→**Status:** done
+   265→
+   266→### Files created (all under `engine/src/cache/osrs/`)
+   267→- `OsrsAnimFrame.ts` (~401 lines incl. extensive comments + helpers)
+   268→- `OsrsSeqType.ts`  (~201 lines)
+   269→- `index.ts`        (updated barrel — added 2 named re-exports for the new classes; OsrsModel remains the default export established by task 5-a)
+   270→
+   271→### Summary
+   272→Ported RuneLite's `FrameDefinition.java` (anim frames) and the OSRS-extended
+   273→`SequenceDefinition` opcode set to TypeScript, following the LostCity
+   274→conventions used by the existing 377 decoders at
+   275→`engine/src/cache/graphics/AnimFrame.ts` and
+   276→`engine/src/cache/config/SeqType.ts`. Output uses `Packet` from
+   277→`#/io/Packet.js` for all byte reading/writing, `printWarning` from
+   278→`#/util/Logger.js` for warnings, and `AnimBase` from
+   279→`#/cache/graphics/AnimBase.js` for the shared skeleton registry.
+   280→
+   281→The skeleton (AnimBase) format is byte-identical between 377 and OSRS for
+   282→pre-HD content — the existing `AnimBase.unpack()` is reused unchanged.
+   283→`OsrsAnimFrame.decode(data, baseId)` looks up `AnimBase.instances[baseId]`
+   284→and bails with a warning if the base is missing, so the pipeline must load
+   285→skeletons before frames.
+   286→
+   287→### Public API
+   288→```ts
+   289→class OsrsAnimFrame {
+   290→    // 377-shape fields (for polymorphism with AnimFrame):
+   291→    delay: number;
+   292→    base: number;
+   293→    length: number;
+   294→    groups: Int32Array;
+   295→    x: Int32Array;
+   296→    y: Int32Array;
+   297→    z: Int32Array;
+   298→
+   299→    // OSRS-only extras:
+   300→    frameId: number;           // assigned by caller before toLegacy377()
+   301→    frameLength: number;       // original group count
+   302→    flags: Int32Array;         // per-group typeFlag bytes
+   303→    interpolationType: number; // 0 if absent
+   304→    leftHandWeight: number;    // -1 if absent
+   305→    rightHandWeight: number;   // -1 if absent
+   306→
+   307→    static decode(data: Uint8Array, baseId: number): OsrsAnimFrame | null;
+   308→    toLegacy377(): Uint8Array;
+   309→}
+   310→
+   311→class OsrsSeqType extends ConfigType {
+   312→    // 377-shape fields (mirror of SeqType):
+   313→    frameCount, frames, iframes, delay, loops, walkmerge, stretches,
+   314→    priority, replaceheldleft, replaceheldright, maxloops, preanim_move,
+   315→    postanim_move, duplicatebehavior, duration
+   316→
+   317→    // OSRS-only extras:
+   318→    field12: number;           // code 12 (carried from Java client's field790)
+   319→    leftHandItem: number;      // code 13
+   320→    rightHandItem: number;     // code 14
+   321→    replayFrameDelay: number;  // code 15
+   322→
+   323→    decode(code: number, dat: Packet): void;
+   324→    postDecode(): void;
+   325→    // Plus static configs[] / get / getId / getByName / count (mirror of SeqType)
+   326→}
+   327→```
+   328→
+   329→### Key API decisions
+   330→1. **`OsrsAnimFrame` is a sibling class, not `extends AnimFrame`.**
+   331→   The 377 `AnimFrame` is heavily tied to its 4-section `unpack()` static
+   332→   loader and the `AnimFrame.instances[]` / `AnimFrame.order[]` registries
+   333→   managed by `OnDemand.cache`. Subclassing would inherit those statics
+   334→   verbatim and route OSRS frames into the live 377 registry — exactly
+   335→   what the modular pipeline wants to avoid. A sibling class with matching
+   336→   field shape gives polymorphism without unwanted registry coupling.
+   337→   This mirrors the sibling-class pattern used by `OsrsModel` (task 5-a).
+   338→
+   339→2. **`OsrsSeqType` is a sibling class extending `ConfigType` directly**, not
+   340→   `extends SeqType`. Same reasoning as above — `SeqType` has private
+   341→   static `configs[]` / `configNames` and bound `load/parse/get` methods
+   342→   that would route OSRS seqs into the shared 377 registry.
+   343→
+   344→3. **`OsrsAnimFrame.decode()` takes `baseId` as a parameter** even though
+   345→   the trailing 2 bytes of the blob also encode it. We cross-check and
+   346→   warn on mismatch but trust the parameter — the caller is expected to
+   347→   have resolved the base ID through the cache index, and the trailing
+   348→   bytes are a redundant integrity check (sometimes zero in OSRS caches
+   349→   that store the base reference in a separate index file).
+   350→
+   351→4. **`frameId` defaults to 0** in `toLegacy377()` because the OSRS blob
+   352→   doesn't carry a frame ID. The modular packer is expected to assign a
+   353→   real ID (and rewrite it into the head section if needed) before the
+   354→   blob reaches the live client.
+   355→
+   356→5. **`OsrsSeqType.decode()` throws on codes 16+** (sub-frame references).
+   357→   The task spec describes them only as "16+ for sub-frame references"
+   358→   without a layout. Throwing lets the dep tracer (task 6) flag any seq
+   359→   that uses them, rather than silently dropping data.
+   360→
+   361→### Format ambiguities resolved
+   362→
+   363→1. **"For groups with no flag, the previous group's value carries forward
+   364→   (or 0 for translate, 128 for scale — same default-value rule as 377)"**
+   365→   — interpreted as: use the SAME default-value rule as the 377 decoder
+   366→   (0 for OP_TRANSLATE/OP_ROTATE/OP_ALPHA, 128 for OP_SCALE). The
+   367→   "carry forward" phrasing in the spec was a description of how the
+   368→   default value doesn't change between adjacent same-bone-type groups,
+   369→   not a request to track a per-axis running last-value. The synthetic
+   370→   OP_BASE pull-forward walk from `AnimFrame.unpack()` is preserved
+   371→   unchanged — it emits a zero-value entry for the most recent OP_BASE
+   372→   bone when a non-OP_BASE bone has a non-zero flag.
+   373→
+   374→2. **OSRS body layout is INTERLEAVED, not sectioned.** The 377 decoder
+   375→   reads flags from a separate `tran1` section and smart values from a
+   376→   separate `tran2` section. The OSRS spec describes "For each group i:
+   377→   read typeFlag, then read axis values for set bits" — i.e., the flag
+   378→   byte and the smart values are read sequentially from a single
+   379→   section. This matches RuneLite's `FrameDefinition` decoder. Verified
+   380→   by round-trip smoke test below.
+   381→
+   382→3. **Optional interpolation tail.** RuneLite's `FrameDefinition` reads
+   383→   (after the delay byte) an optional `interpolationType: u8`, then
+   384→   (if 4 more bytes are present) `leftHandItem: u16` and
+   385→   `rightHandItem: u16`. The task spec calls these `leftHandWeight` /
+   386→   `rightHandWeight` — I followed the spec's naming but kept RuneLite's
+   387→   read layout (1 byte if any remain, then 4 bytes if at least 5 remain
+   388→   total). If a future cache uses a different layout, this is the
+   389→   single block to revisit.
+   390→
+   391→4. **Opcode 12 (`field790` in the Java client).** The 377 TS
+   392→   `SeqType.decode()` does NOT handle code 12 (it throws). The Java
+   393→   client does, reading a `u32`. The OSRS spec doesn't mention code 12
+   394→   explicitly, but since OSRS is a superset of the 377 client opcode
+   395→   set, code 12 should be handled. I added it as `field12: u32` with a
+   396→   comment documenting it as an opaque field carried over from the
+   397→   Java client (`field790`) — its semantic meaning isn't documented
+   398→   upstream.
+   399→
+   400→5. **`AnimBase.instances[]` is reused.** The OSRS skeleton format is
+   401→   byte-identical to 377 for pre-HD content (same `length u8`, `types
+   402→   u8[]`, `labels u8[][]` layout). Rather than duplicate the loader,
+   403→   `OsrsAnimFrame` references the existing `AnimBase.instances[]`
+   404→   registry. OSRS-only pipelines that don't load 377 anims must still
+   405→   call `AnimBase.unpack()` on OSRS base files to populate this
+   406→   registry before invoking `OsrsAnimFrame.decode()`. (This is the
+   407→   task 6 dep tracer's responsibility.)
+   408→
+   409→### `toLegacy377()` transform — limitations
+   410→
+   411→The transform emits a faithful 1-frame 377 anim blob that the existing
+   412→377 client can render via `AnimFrame.unpack()`. The following OSRS-only
+   413→data is **dropped**:
+   414→
+   415→| OSRS field             | 377 equivalent                | Impact |
+   416→|------------------------|-------------------------------|--------|
+   417→| `interpolationType`    | none                          | Blended/interpolated animations fall back to standard single-frame playback |
+   418→| `leftHandWeight`       | none                          | Left-hand blend weight lost |
+   419→| `rightHandWeight`      | none                          | Right-hand blend weight lost |
+   420→
+   421→The `frameId` field is REQUIRED by 377 (the head section stores it as a
+   422→`u16`) but is NOT carried in the OSRS blob. `toLegacy377()` uses
+   423→`this.frameId` (default 0). Callers that need a specific ID routed into
+   424→`AnimFrame.instances[id]` must set `frame.frameId` before calling
+   425→`toLegacy377()`.
+   426→
+   427→The skeleton (AnimBase) data is re-emitted byte-for-byte into the 377
+   428→base-data section. Since the OSRS skeleton format is identical to 377
+   429→for pre-HD content, this is lossless. The 377 `AnimBase.unpack()` will
+   430→push a DUPLICATE base entry into `AnimBase.instances[]` when re-decoding
+   431→the legacy blob — the dep tracer / packer should deduplicate by content
+   432→hash if memory matters.
+   433→
+   434→### Round-trip smoke test
+   435→Verified:
+   436→- Synthetic OSRS frame bytes (19 bytes including trailing baseId)
+   437→  → `OsrsAnimFrame.decode()` → all fields match expected (groups, x, y, z,
+   438→  flags, delay, base, frameLength).
+   439→- `toLegacy377()` → 41-byte 377-format blob.
+   440→- `AnimFrame.unpack(legacy)` → `AnimFrame.instances[9999]` populated with
+   441→  identical `delay`, `length`, `groups`, `x`, `y`, `z` (modulo the
+   442→  re-unpacked base getting a new ID — see limitations above).
+   443→- `OsrsSeqType` synthetic blob (codes 1, 5, 13, 14, 15, 250, 0) decodes
+   444→  all fields correctly, including OSRS-only `leftHandItem` /
+   445→  `rightHandItem` / `replayFrameDelay`.
+   446→- `OsrsSeqType.decode(16)` throws as expected (unimplemented sub-frame
+   447→  refs).
+   448→
+   449→### Lint
+   450→`bun run lint` reports the same 4 pre-existing errors (in `src/io/Packet.ts`
+   451→— unused `checkcrc` params, unrelated to this task) and 15 pre-existing
+   452→`any` warnings. The three new/updated files (`OsrsAnimFrame.ts`,
+   453→`OsrsSeqType.ts`, `index.ts`) produce zero lint errors and zero
+   454→warnings. No regression. (Initial run flagged two `'Strings must use
+   455→singlequote'` errors where I'd used backtick template literals without
+   456→interpolation — fixed by switching to single quotes.)
+   457→
+   458→### Local helpers
+   459→A `psmartSigned(out: number[], value: number)` helper is defined at the
+   460→bottom of `OsrsAnimFrame.ts`, identical to the one in `OsrsModel.ts`
+   461→(task 5-a). Both files have their own copy because LostCity's
+   462→`Packet.psmart()` only handles non-negative values. If a third file
+   463→needs this, future task should hoist it into `Packet.ts` as
+   464→`psmartSigned()`. A `pushU16(out, v)` helper is also defined locally
+   465→for the same reason (LostCity's `Packet.p2()` writes to a Packet's
+   466→internal DataView, not a plain `number[]`).
+   467→
+   468→### Next-action hooks for downstream tasks
+   469→- **Task 6 (dep tracer):** before invoking `OsrsAnimFrame.decode()` for
+   470→  an OSRS anim file, ensure the corresponding `AnimBase` has been
+   471→  loaded via `AnimBase.unpack()`. The OSRS cache stores anims in
+   472→  archive 2 and skeletons in a separate index — the tracer must walk
+   473→  both and load skeletons FIRST.
+   474→- **Task 6 (dep tracer):** flag any `OsrsSeqType` whose decode throws
+   475→  on codes 16+ — those seqs use sub-frame references that this decoder
+   476→  doesn't yet support.
+   477→- **Task 7 (OpenRS2 packing):** when packing an OSRS anim, call
+   478→  `OsrsAnimFrame.decode()` then `toLegacy377()` to emit a `.anim` file
+   479→  the 377 client can consume. Assign a fresh `frameId` before calling
+   480→  `toLegacy377()` and rewrite it into the head if the packer reuses
+   481→  IDs from a pre-existing 377 anim index.
+   482→- **Task 8 (content-folder writer):** use
+   483→  `OsrsAnimFrame.decode(...).toLegacy377()` to emit `.anim` files into
+   484→  `content/osrs-import/<pilot>/anims/`. Also emit the matching
+   485→  AnimBase binary into the same folder so the legacy loader can
+   486→  re-unpack it.
+   487→- **Task 9 (variant registry):** the registry's anim resolver should
+   488→  prefer OSRS-decoded frames over 377-native ones when both are
+   489→  available for the same logical anim ID, since OSRS frames carry
+   490→  richer interpolation data (even though it's dropped on the legacy
+   491→  path today, future client work could consume it directly).
+   492→
+   493→---
+   494→
+   495→## Task 5-c — Port OSRS NpcConfig decoder to TS
+   496→**Agent:** OsrsNpcConfigPorter
+   497→**Status:** done
+   498→
+   499→### Files created / modified
+   500→- **Created:** `engine/src/cache/osrs/OsrsNpcType.ts` (~836 lines, incl. extensive
+   501→  JSDoc on every opcode + design-decision comments)
+   502→- **Modified:** `engine/src/cache/osrs/index.ts` (added 1 named re-export:
+   503→  `export { default as OsrsNpcType } from './OsrsNpcType.js';`)
+   504→
+   505→### Summary
+   506→Ported the OSRS NpcConfig opcode decoder to TypeScript as `OsrsNpcType`,
+   507→following the LostCity conventions used by the existing 377 decoder at
+   508→`engine/src/cache/config/NpcType.ts` and matching the sibling-class pattern
+   509→established by tasks 5-a (`OsrsModel`) and 5-b (`OsrsAnimFrame` /
+   510→`OsrsSeqType`).
+   511→
+   512→The OSRS NPC opcode set is a strict superset of 377: every 377 opcode
+   513→decodes the same way, plus OSRS adds codes 23, 24, 25, 26, 27, 28, 29,
+   514→118, 119, 121, 122, 123, 124, 125, 126, 127, 128, 129, and 130-134.
+   515→This decoder handles BOTH sets so it can read an OSRS-format `npc.dat`
+   516→directly. LostCity server-side codes 200-214 are read-and-discarded
+   517→(with debug log) so this decoder can also parse a LostCity npc.dat
+   518→without crashing.
+   519→
+   520→### Public API
+   521→```ts
+   522→class OsrsNpcType extends ConfigType {
+   523→    // Static registry (mirror of OsrsSeqType's pattern):
+   524→    static configNames: Map<string, number>;
+   525→    static configs: OsrsNpcType[];
+   526→    static get(id): OsrsNpcType;
+   527→    static getId(name): number;
+   528→    static getByName(name): OsrsNpcType | null;
+   529→    static get count(): number;
+   530→
+   531→    // 377 shared fields (mirror of NpcType.ts):
+   532→    name, desc, size, models, heads, hasanim, readyanim, walkanim,
+   533→    walkanim_b, walkanim_r, walkanim_l, hasalpha, recol_s, recol_d,
+   534→    op (size-10 lazy array), resizex, resizey, resizez, minimap,
+   535→    vislevel, resizeh, resizev, alwaysontop, ambient, contrast,
+   536→    headicon, turnspeed, multivarbit, multivarp, multinpc, active,
+   537→    category, stats[6], params
+   538→
+   539→    // OSRS-only fields:
+   540→    runanim, runanim_l, runanim_r, runanim_b           // code 24
+   541→    crawlanim, crawlanim_l, crawlanim_r, crawlanim_b, // codes 25/26
+   542→        crawlanim_b2                                    // (5th short of code 26)
+   543→    recol_s_tex, recol_d_tex                           // codes 28/29
+   544→    sizeH, sizeW                                       // codes 118/119
+   545→    mapFunction, mapScene                              // code 121
+   546→    heightmap                                          // code 122
+   547→    hoverText                                          // code 123
+   548→    flipX, flipY                                       // codes 124/125
+   549→    forceRenderPriority, clipOnMinimap, clip, interactable  // codes 126-129
+   550→    osrsExtensions: Int8Array(5)                       // codes 130-134
+   551→
+   552→    // Methods:
+   553→    decode(code: number, dat: Packet): void;
+   554→    toLegacy377NpcConfig(): string[];
+   555→    extractDependencyRefs(): { models: number[]; heads: number[]; anims: number[]; params: number[] };
+   556→}
+   557→```
+   558→
+   559→### Key API decisions
+   560→1. **`OsrsNpcType` extends `ConfigType` directly, NOT `NpcType`.** Same
+   561→   reasoning as task 5-b's `OsrsSeqType`: subclassing `NpcType` would
+   562→   inherit its private static `configs[]` / `configNames` and bound
+   563→   `load/parse/get` methods, routing OSRS NPC configs into the shared
+   564→   377 registry. A sibling class with a parallel registry keeps OSRS
+   565→   configs isolated so the modular variant selector (task 9) can pick
+   566→   which one to serve.
+   567→
+   568→2. **`op` array is lazily sized up to 10 entries.** Legacy opcodes 30-34
+   569→   populate `op[0..4]` (op1..op5). OSRS opcode 27 reads a u8 index and
+   570→   can populate any index (typically 5..9 for op6..op10). The array is
+   571→   allocated on first use and grown dynamically if opcode 27's index
+   572→   exceeds the current length. This avoids pre-allocating for the
+   573→   common case (5 ops) while still supporting the extended set.
+   574→
+   575→3. **`toLegacy377NpcConfig()` emits raw asset IDs, NOT pack-file
+   576→   names.** This deliberately decouples the engine class from
+   577→   `#tools/pack/PackFile.js` lookups (SeqPack, NpcPack, ModelPack) —
+   578→   mirroring the existing `NpcType` class which also doesn't import
+   579→   PackFile. Task 8 (content-folder writer) is expected to post-process
+   580→   the emitted lines to rename IDs to debugnames via the pack files.
+   581→   The format `key=<int>` survives the round-trip into the content
+   582→   folder because LostCity's config parser accepts both names and
+   583→   integer literals.
+   584→
+   585→4. **OSRS-only fields are emitted as `param=osrs_<field>,<value>`
+   586→   entries.** This preserves them through the content-folder round-trip
+   587→   even though the 377 client doesn't understand them. When task 9
+   588→   (variant registry) registers these as well-known param IDs, the
+   589→   re-packing path will preserve them as opaque param values.
+   590→
+   591→5. **LostCity server-side codes 200-214 are read-and-discarded, not
+   592→   stored.** The spec describes these as "IGNORE them (skip silently,
+   593→   log debug)" — interpreted as: read the payload (using the known
+   594→   format from `NpcType.ts`) and discard the values, so this decoder
+   595→   can parse a LostCity npc.dat without crashing. The discarded values
+   596→   are NOT stored on this class because OSRS-format NPCs don't carry
+   597→   these fields; the modular pipeline is expected to layer server-side
+   598→   config on top via the content folder rather than the cache.
+   599→
+   600→6. **`extractDependencyRefs()` excludes `multinpc[]`.** Multinpc
+   601→   references other NPC config IDs, but those are walked via the NPC
+   602→   config index, not via archive IDs (1/2 for models/anims). Including
+   603→   them in the returned `params`/`anims` arrays would mix asset kinds.
+   604→   Task 6 (dep tracer) is expected to walk multinpc separately by
+   605→   recursing into the NPC config index.
+   606→
+   607→7. **`osrsExtensions` is a fixed 5-slot `Int8Array` indexed by
+   608→   `code - 130`.** Codes 130-134 are described in the spec as "store
+   609→   opaquely" with no semantic meaning documented upstream. A fixed
+   610→   array is simpler than a `Map<number, number>` and gives O(1) access
+   611→   for consumers that later want to interpret specific slots.
+   612→
+   613→### Opcode ambiguities resolved
+   614→
+   615→1. **Opcode 23 reads 5 shorts, NOT 6.** The task spec listed
+   616→   "(stand, walk, walkL, walkR, walkB, run)" — 6 names — but said
+   617→   "g2×5". The trailing "run" is a spec typo; standard RuneLite reads
+   618→   exactly 5 shorts (stand, walk, walkLeft, walkRight, walkBack).
+   619→   Decoded as: readyanim, walkanim, walkanim_l, walkanim_r, walkanim_b
+   620→   (overwriting the same fields populated by 377 codes 13/14/17).
+   621→
+   622→2. **Opcode 26 field label is "runanim code 26" but values are all
+   623→   crawl-related.** Treated as a spec typo — opcode 26 is decoded as a
+   624→   crawl-anim family extension (5 shorts: crawl, crawlL, crawlR,
+   625→   crawlB, crawlBack2). Overwrites the 4 crawl fields from opcode 25
+   626→   (last write wins) and additionally populates `crawlanim_b2`.
+   627→
+   628→3. **Opcode 17 byte order: spec vs `NpcType.ts`.** The task spec says
+   629→   code 17 reads (walk, back, left, right). The existing 377
+   630→   `NpcType.ts` reads (walk, back, right, left) — left/right swapped.
+   631→   The Java client NpcType.java reads in obfuscated order with unclear
+   632→   semantics. LostCity's own unpack tool (`unpackNpcConfig`) reads in
+   633→   the SPEC order (l before r), so two of three LostCity sources agree
+   634→   with the spec. This decoder follows the spec (l before r) for code
+   635→   17. Documented as a known discrepancy with `NpcType.ts`; if
+   636→   LostCity ever regenerates its 377 npc.dat from RL sources, the 377
+   637→   `NpcType.ts` should be updated to match.
+   638→
+   639→4. **Opcode 28 vs 29 (texture recolors).** Spec describes 28 as
+   640→   "recol_d_texture (dst)" and 29 as "recol_s/d texture (paired with
+   641→   28)" — both with shape "g1 count, g2×2 per pair". The semantic
+   642→   distinction between 28 and 29 is unclear from the spec; both are
+   643→   decoded identically and stored in the same `recol_s_tex` /
+   644→   `recol_d_tex` parallel arrays (last opcode wins, matching how
+   645→   legacy opcode 40 behaves on repeat). If a future cache distinguishes
+   646→   them semantically, the single `decodeTexRecolors()` helper is the
+   647→   one place to split the storage.
+   648→
+   649→5. **`desc` field uses `gjstr()`, not `gjstrraw()`.** The task spec
+   650→   says code 3 reads `gjstrraw`. The Java client's `gjstrraw()`
+   651→   returns `byte[]` (raw bytes). The existing 377 `NpcType.ts` uses
+   652→   `gjstr()` (which returns a string) and stores `desc` as a string.
+   653→   `Packet.ts` does NOT have a `gjstrraw()` method. To match the
+   654→   existing TS convention (and avoid touching `Packet.ts`), this
+   655→   decoder uses `gjstr()`. If raw-bytes round-trip fidelity becomes
+   656→   important, a future task should add `Packet.gjstrraw()` and store
+   657→   `desc` as `Uint8Array`.
+   658→
+   659→6. **Opcode 101 contrast scaling.** The Java client reads `g1b() * 5`
+   660→   for the effective contrast value. The existing 377 `NpcType.ts`
+   661→   stores the raw `g1b()` byte (no scaling). This decoder matches the
+   662→   377 TS convention (store raw byte; consumer scales). Documented in
+   663→   a code comment.
+   664→
+   665→7. **Opcode 249 (params) inherited unchanged.** Uses
+   666→   `ParamHelper.decodeParams(dat)` from the existing engine — same
+   667→   path as 377 NpcType. No OSRS-specific changes needed.
+   668→
+   669→### `extractDependencyRefs()` — what it returns
+   670→
+   671→```ts
+   672→{
+   673→    models: number[];   // archive-1 IDs from `models[]` (code 1)
+   674→    heads: number[];    // archive-1 IDs from `heads[]` (code 60)
+   675→                        // — tracked separately for head-icon render path
+   676→    anims: number[];    // seq archive-2 IDs from every anim field:
+   677→                        //   readyanim, walkanim, walkanim_{b,l,r},
+   678→                        //   runanim, runanim_{b,l,r},
+   679→                        //   crawlanim, crawlanim_{b,l,r,b2}
+   680→    params: number[];   // param config IDs from `params` map keys
+   681→                        // — values are NOT walked (they could be any
+   682→                        //   asset kind depending on the param's type;
+   683→                        //   the dep tracer should resolve them via
+   684→                        //   ParamType lookups)
+   685→}
+   686→```
+   687→
+   688→Sentinel values (-1, 0, 65535) are excluded. The returned arrays are
+   689→fresh — callers may mutate without affecting the source NPC config.
+   690→
+   691→Multinpc references (`multinpc[]` from code 106) are NOT included
+   692→because they reference other NPC config IDs, not asset archive IDs.
+   693→Task 6 (dep tracer) is expected to walk multinpc separately by
+   694→recursing into the NPC config index.
+   695→
+   696→### Round-trip smoke test (verified)
+   697→- Synthetic OSRS NPC config blob (175 bytes, codes 1, 2, 12, 13, 23,
+   698→  24, 25, 26, 27, 30, 40, 60, 95, 107, 118, 121, 123, 124, 130, 200,
+   699→  205, 211, 249, 250, 0) decoded correctly:
+   700→  - All 377 fields populated as expected
+   701→  - All OSRS-only fields populated as expected (run/crawl anim families,
+   702→    ext ops, sizeH, mapFunction, mapScene, hoverText, flipX,
+   703→    osrsExtensions, params)
+   704→  - LostCity server-side codes 200 and 211 skipped with debug log
+   705→  - Unknown LostCity code 205 (no documented payload) warned loudly
+   706→- Opcode 17 verified separately: reads in spec order
+   707→  (walkanim, walkanim_b, walkanim_l, walkanim_r), not the
+   708→  `NpcType.ts` order (walkanim, walkanim_b, walkanim_r, walkanim_l)
+   709→- `toLegacy377NpcConfig()` emits 38 ini-style lines for the test NPC,
+   710→  covering all populated 377 fields + all OSRS-only fields as
+   711→  `param=osrs_<field>,<value>` entries
+   712→- `extractDependencyRefs()` returns 2 models, 1 head, 14 anims,
+   713→  1 param for the test NPC
+   714→
+   715→### Lint
+   716→`bun run lint` reports the same 4 pre-existing errors (in
+   717→`src/io/Packet.ts` — unused `checkcrc` params, unrelated to this task)
+   718→and 15 pre-existing `any` warnings. The new file (`OsrsNpcType.ts`)
+   719→and updated barrel (`index.ts`) produce zero lint errors and zero
+   720→warnings. No regression. `bunx tsc --noEmit -p tsconfig.json` also
+   721→reports zero TypeScript errors in the new files.
+   722→
+   723→### Next-action hooks for downstream tasks
+   724→- **Task 6 (dep tracer):** call `extractDependencyRefs()` on every
+   725→  decoded `OsrsNpcType` to seed the dependency graph. Walk `multinpc[]`
+   726→  separately by recursing into the NPC config index. Walk `params`
+   727→  values via `ParamType` lookups to resolve any asset references
+   728→  stored as param values (e.g. an `osrs_runanim` param might store a
+   729→  seq ID).
+   730→- **Task 7 (OpenRS2 packing):** when re-packing an OSRS NPC config
+   731→  into a 377-format `npc.dat`, use `toLegacy377NpcConfig()` to emit
+   732→  the ini-style config, then run the existing
+   733→  `engine/tools/pack/config/NpcConfig.ts` packer on it. The OSRS-only
+   734→  fields will survive as `param=` entries.
+   735→- **Task 8 (content-folder writer):** post-process the output of
+   736→  `toLegacy377NpcConfig()` to rename raw asset IDs to debugnames via
+   737→  `SeqPack.getById()` / `NpcPack.getById()` / `ModelPack.getById()`.
+   738→  The fallback `seq_<id>` / `npc_<id>` / `model_<id>` literal forms
+   739→  are also acceptable (the LostCity config parser accepts both).
+   740→- **Task 9 (variant registry):** register well-known param IDs for
+   741→  each `param=osrs_<field>,<value>` entry emitted by
+   742→  `toLegacy377NpcConfig()` so the re-packing path preserves them.
+   743→  Suggested param debugnames: `osrs_runanim`, `osrs_runanim_l`,
+   744→  `osrs_runanim_r`, `osrs_runanim_b`, `osrs_crawlanim`,
+   745→  `osrs_crawlanim_l`, `osrs_crawlanim_r`, `osrs_crawlanim_b`,
+   746→  `osrs_crawlanim_b2`, `osrs_walkanim_b`, `osrs_recol_tex{N}s`,
+   747→  `osrs_recol_tex{N}d`, `osrs_sizeH`, `osrs_sizeW`, `osrs_mapFunction`,
+   748→  `osrs_mapScene`, `osrs_heightmap`, `osrs_hoverText`, `osrs_flipX`,
+   749→  `osrs_flipY`, `osrs_forceRenderPriority`, `osrs_clipOnMinimap`,
+   750→  `osrs_clip`, `osrs_interactable`, `osrs_ext130`..`osrs_ext134`.
+   751→- **Future cleanup:** if the 377 `NpcType.ts` is ever regenerated from
+   752→  RL sources, update its opcode 17 to read in spec order (l before r)
+   753→  to match this decoder.
+   754→
+   755→---
+   756→
+   757→## Task 6 — Dependency tracer + deps.json schema
+   758→**Agent:** DepsTracer
+   759→**Status:** done
+   760→
+   761→### Files created (all under `engine/tools/osrs/`)
+   762→- `DepsSchema.ts` (~239 lines) — TypeScript types/interfaces for the
+   763→  `deps.json` schema. Exports: `NodeKind`, `NodeSource`, `DepRef`,
+   764→  `DepNode`, `DepCycle`, `DepRoot`, `DepsMap`, `DEPS_SCHEMA_VERSION`,
+   765→  `nodeKey()`, `isRefParamType()`, `paramTypeToNodeKind()`.
+   766→- `DependencyTracer.ts` (~1006 lines incl. extensive JSDoc) — the tracer
+   767→  class + the `CacheReader` interface + the `walkParams` standalone helper.
+   768→- `Trace.ts` (~202 lines) — CLI entrypoint. Parses `--npc=<id>` (repeatable),
+   769→  `--out=<path>`, `--osrs-cache=<dir>`. Includes a `NullCacheReader` so the
+   770→  CLI runs end-to-end against no cache (pre-Task-7 default mode).
+   771→- `SelfTest.ts` (~136 lines, dev-only) — stub-driven test that verifies the
+   772→  transitive walk descends into models/seqs/anims/params/anim-bases. Run
+   773→  with `bun tools/osrs/SelfTest.ts`. Not required by the task spec; kept
+   774→  for future regression checks.
+   775→- Created empty output dir: `/home/z/my-project/lostcity/content/deps/`.
+   776→
+   777→### Summary
+   778→Implements a depth-first dependency walker that records an OSRS NPC's full
+   779→transitive dependency graph as a `DepsMap` (JSON-serializable). The walker
+   780→handles every node kind listed in the task spec (`npc`, `model`, `anim`,
+   781→`anim-base`, `seq`, `obj`, `param`, `struct`, `script`, `texture`,
+   782→`particle`, `sound`), with per-kind `visitXxx` methods that decode the
+   783→asset via a `CacheReader` interface (abstract — backed by either a real
+   784→OSRS cache or a test stub) and recurse into child refs.
+   785→
+   786→Cycle detection: per-branch `path: Set<string>` of node keys currently
+   787→being walked. Re-entering a key records a `DepCycle` and skips recursion —
+   788→guarantees termination on pathological param cross-reference loops.
+   789→
+   790→Memoization: visited nodes are cached for the lifetime of the tracer
+   791→instance, so `traceMany()` over multiple NPCs shares work across NPCs
+   792→that depend on the same model/seq/etc.
+   793→
+   794→### deps.json schema (TypeScript interfaces, pasted inline)
+   795→
+   796→```ts
+   797→export type NodeKind =
+   798→    | 'npc' | 'model' | 'anim' | 'anim-base' | 'seq' | 'obj'
+   799→    | 'param' | 'struct' | 'script' | 'texture' | 'particle' | 'sound';
+   800→
+   801→export type NodeSource = 'osrs' | 'legacy377';
+   802→
+   803→export interface DepRef {
+   804→    kind: NodeKind;
+   805→    id: number | string;        // string for scripts (debugname-as-id)
+   806→    via?: string;               // e.g. 'readyanim', 'models[0]', 'param:attack_anim'
+   807→    missing?: boolean;
+   808→}
+   809→
+   810→export interface DepNode {
+   811→    kind: NodeKind;
+   812→    id: number | string;
+   813→    name: string | null;
+   814→    source: NodeSource;
+   815→    transformedFrom: number | string | null;  // set by Task 8 when emitting 377 twin
+   816→    cycle?: boolean;
+   817→    missing?: boolean;
+   818→    skins?: boolean;            // model nodes only — true if triangleSkin/vertexSkin non-empty
+   819→    note?: string;              // e.g. 'TODO: deep obj walk not implemented'
+   820→    deps: DepRef[];
+   821→}
+   822→
+   823→export interface DepCycle {
+   824→    path: string[];             // node keys from walk root to reentry point
+   825→    reentry: string;
+   826→}
+   827→
+   828→export interface DepRoot {
+   829→    kind: NodeKind;
+   830→    id: number | string;
+   831→    name: string | null;
+   832→}
+   833→
+   834→export interface DepsMap {
+   835→    version: 1;
+   836→    root: DepRoot;
+   837→    secondaryRoots?: DepRef[];  // present only for traceMany() batch output
+   838→    nodes: Record<string, DepNode>;  // keyed by `${kind}:${id}` for O(1) lookup
+   839→    cycles: DepCycle[];
+   840→    missing: DepRef[];
+   841→}
+   842→
+   843→export const DEPS_SCHEMA_VERSION = 1 as const;
+   844→
+   845→export function nodeKey(kind: NodeKind, id: number | string): string;
+   846→export function isRefParamType(type: string): boolean;
+   847→export function paramTypeToNodeKind(type: string): NodeKind | null;
+   848→```
+   849→
+   850→### CacheReader interface signature (for Task 7 to implement)
+   851→
+   852→```ts
+   853→export interface CacheReader {
+   854→    /** OSRS model blob (archive 1). Returns decoded OsrsModel or null. */
+   855→    readModel(id: number): OsrsModel | null;
+   856→    /** OSRS animation frame (archive 2 file). */
+   857→    readAnim(id: number): OsrsAnimFrame | null;
+   858→    /** OSRS animation skeleton (separate OSRS index; same byte layout as 377). */
+   859→    readAnimBase(id: number): AnimBase | null;
+   860→    /** OSRS sequence config (seq.dat entry). */
+   861→    readSeq(id: number): OsrsSeqType | null;
+   862→    /** OSRS NPC config (npc.dat entry). */
+   863→    readNpc(id: number): OsrsNpcType | null;
+   864→    /** Item config. Returns legacy ObjType for now (OsrsObjType not ported). */
+   865→    readObj(id: number): ObjType | null;
+   866→    /** Param type. Returns legacy ParamType if loaded, null for OSRS-native params. */
+   867→    readParam(id: number): ParamType | null;
+   868→    /** Struct config. */
+   869→    readStruct(id: number): StructType | null;
+   870→    /** Texture image bytes. */
+   871→    readTexture(id: number): Uint8Array | null;
+   872→    /** OSRS particle system bytes. */
+   873→    readParticle(id: number): Uint8Array | null;
+   874→    /** Sound effect bytes (synth or midi). */
+   875→    readSound(id: number): Uint8Array | null;
+   876→    /** Optional debugname lookup (consults content/pack/<kind>.pack). */
+   877→    getName?(kind: NodeKind, id: number | string): string | null;
+   878→}
+   879→```
+   880→
+   881→**Task 7 implementation notes:**
+   882→1. The OSRS cache stores skeletons (AnimBase) in a separate index from
+   883→   frames. The reader MUST load bases into `AnimBase.instances[]` BEFORE
+   884→   returning frames that reference them — `OsrsAnimFrame.decode()`
+   885→   requires the base to be present (see task 5-b worklog entry).
+   886→2. Every method MUST return `null` on missing IDs — do NOT throw. The
+   887→   tracer records null returns as `missing: true` dep refs.
+   888→3. `getName` is optional but recommended — without it, `DepNode.name`
+   889→   will be `null` for every node except NPCs (which carry their own
+   890→   `name` field on `OsrsNpcType`) and seqs (which carry `debugname`).
+   891→4. For `readParam`, prefer consulting an OSRS-side param registry if
+   892→   one is built. Falling back to the legacy 377 `ParamType.get(id)`
+   893→   works for shared params but will miss OSRS-native ones.
+   894→
+   895→### Key design decisions
+   896→
+   897→1. **`visitNode(kind, id, path)` is PUBLIC**, not private as the task
+   898→   spec hinted. Rationale: the standalone `walkParams` helper needs to
+   899→   call it (the spec explicitly specified `walkParams(params, tracer,
+   900→   deps)` as a standalone function taking the tracer as an argument),
+   901→   and future per-kind walkers (e.g. an `OsrsObjType` walker added by
+   902→   task 8) should hook into the same cycle-detection + memoization
+   903→   logic without duplicating it. The state it touches (`nodes`,
+   904→   `cycles`, `missing`) is still encapsulated as private fields on
+   905→   the tracer instance.
+   906→
+   907→2. **`walkParams` is BOTH a public method on the tracer (`tracer.walkParams(params, deps, path)`)
+   908→   AND a standalone exported function.** The standalone wrapper exists
+   909→   for parity with the task spec's `walkParams(params, tracer, deps)`
+   910→   signature; it adds a required `path: Set<string>` argument (not in
+   911→   the spec) because cycle detection depends on it. Callers should
+   912→   prefer the method form.
+   913→
+   914→3. **`id` is `number | string` throughout the schema.** Numeric for
+   915→   cache-indexed assets (npc/model/anim/seq/obj/param/struct/texture/
+   916→   particle/sound); string for scripts (whose "id" is their debugname,
+   917→   e.g. `'dragon'`). This is necessary because LostCity runescript
+   918→   references assets by name (e.g. `npc_anim(dragon_attack, 0)`), and
+   919→   the script scanner can't resolve names to numeric cache IDs without
+   920→   the pack files (task 8's job). String-ID refs are recorded as
+   921→   `missing: true` until task 8 resolves them.
+   922→
+   923→4. **`transformedFrom` is always `null` in the tracer's output.** It
+   924→   will be populated by task 8 (content-folder writer) when it
+   925→   actually generates the 377-transformed twin of an OSRS node. The
+   926→   field exists in the schema now so task 8 doesn't need a schema
+   927→   migration.
+   928→
+   929→5. **`skins` flag on model nodes.** Per task 5-a's next-action hook,
+   930→   models with non-empty `triangleSkin`/`vertexSkin` arrays lose
+   931→   rig-skinning data when transformed to 377. The tracer records this
+   932→   as `skins: boolean` on model nodes so the pilot can prefer
+   933→   `skins === false` models when alternatives exist.
+   934→
+   935→6. **`secondaryRoots` for batched traces.** `traceMany()` keeps the
+   936→   single-`root` schema shape (backward compat with single-NPC
+   937→   traces) by making the first NPC the root and listing any
+   938→   additional NPCs in `secondaryRoots: DepRef[]`. The field is
+   939→   omitted for single-NPC traces (the common case).
+   940→
+   941→7. **`ObjType` deep walk is stubbed.** Per task spec: "for now, treat
+   942→   obj as a partial node and log 'TODO: deep obj walk not
+   943→   implemented'". The `visitObj` method records the obj as a leaf
+   944→   with `note: 'TODO: deep obj walk not implemented (OsrsObjType not
+   945→   ported)'`. When task 8 ports the obj decoder, this method should
+   946→   walk `obj.model`, `obj.manwear`, `obj.womanwear`, `obj.manhead`,
+   947→   `obj.womanhead`, `obj.countobj[]`, `obj.recol_s/d`, and
+   948→   `obj.params` (via `walkParams`).
+   949→
+   950→8. **`ParamType` lookup falls back to the legacy 377 registry.** When
+   951→   `CacheReader.readParam(id)` returns null (the common case until
+   952→   `OsrsParamType` is ported), the tracer tries `ParamType.get(id)`
+   953→   (the legacy 377 static registry). If both miss, the param is
+   954→   recorded with `note: 'param type unknown — value not walked
+   955→   (OsrsParamType not ported)'` and its value is NOT walked (the
+   956→   importer will bring the param's value verbatim, but the tracer
+   957→   can't tell what asset kind it points at).
+   958→
+   959→9. **Script scanning is best-effort regex.** LostCity runescript
+   960→   references assets by debugname in call sites like
+   961→   `npc_anim(dragon_attack, 0)`, `spotanim_npc(firebreath_attack, 92, 0)`,
+   962→   `inv_total(worn, antidragonbreathshield)`, `sound_synth(dragonbreath, 0, 30)`,
+   963→   `npc_param(attack_sound)`. The tracer scans for these patterns and
+   964→   records the discovered names as string-ID dep refs (all marked
+   965→   `missing: true` until task 8 resolves them via pack files). The
+   966→   scan is intentionally conservative — false positives would be
+   967→   worse than false negatives here (the importer would try to fetch
+   968→   non-existent assets).
+   969→
+   970→10. **Script discovery for an NPC uses TWO heuristics:**
+   971→    (a) look for `content/scripts/npc/scripts/<npcName>.rs2` (primary
+   972→    combat script convention); (b) scan all other `.rs2` files for
+   973→    `[<trigger>,<npcName>]` dispatch directives (e.g.
+   974→    `[ai_applayer2,babydragon] @dragon_ai_applayer2(false);`) and
+   975→    register each matching file as a separate script dep with
+   976→    `via: 'dispatch:<trigger>'`. The dispatch-scan is O(files × lines)
+   977→    but runs only once per NPC and only over the `scripts/npc/scripts/`
+   978→    subdir.
+   979→
+   980→### Verification (lint + self-tests)
+   981→
+   982→- `bun run lint` reports the same 4 pre-existing errors (in
+   983→  `src/io/Packet.ts` — unused `checkcrc` params, unrelated to this
+   984→  task) and 15 pre-existing `any` warnings. The four new files
+   985→  (`DepsSchema.ts`, `DependencyTracer.ts`, `Trace.ts`, `SelfTest.ts`)
+   986→  produce ZERO lint errors and ZERO warnings. No regression.
+   987→
+   988→- Self-test 1 (spec-required, NullCacheReader):
+   989→  `bun tools/osrs/Trace.ts --npc=9001 --out=/tmp/test-deps.json`
+   990→  → writes a 1-node deps.json with `npc:9001` recorded as missing
+   991→  (expected — no OSRS cache yet). Exits 0 with a warning. Code path
+   992→  exercised end-to-end.
+   993→
+   994→- Self-test 2 (stub CacheReader, full transitive walk):
+   995→  `bun tools/osrs/SelfTest.ts`
+   996→  → traces a synthetic OSRS NPC (id=9001, name='tormented_demon_stub')
+   997→  with 1 model, 1 head, 4 seqs (readyanim/walkanim/runanim + a
+   998→  param-driven attack_anim), 5 anim frames, 1 anim-base, and 1 param.
+   999→  Result: 14 nodes, 0 missing, 0 cycles. The param-aware walk correctly
+  1000→  resolves `param:999` (type=seq, debugname='attack_anim') and adds a
+  1001→  dep edge `seq:9200 via 'param:attack_anim'` to the NPC's deps[].
+  1002→
+  1003→- Self-test 3 (batched trace):
+  1004→  `bun tools/osrs/Trace.ts --npc=9001 --npc=9002 --out=/tmp/test-deps-batch.json`
+  1005→  → writes a 2-node deps.json with `secondaryRoots: [{kind:'npc', id:9002}]`.
+  1006→  Schema verified.
+  1007→
+  1008→### What's stubbed for the no-cache-yet case
+  1009→- `NullCacheReader` (in `Trace.ts`) returns null for every `readXxx`
+  1010→  method, so every node is recorded as `missing: true`. This is the
+  1011→  expected pre-Task-7 mode — it verifies the code path is exercisable
+  1012→  without requiring OSRS cache bytes.
+  1013→- `CacheReader.readObj` returns the legacy `ObjType` (not
+  1014→  `OsrsObjType` — not yet ported). `visitObj` treats objs as leaves
+  1015→  with a TODO note.
+  1016→- `CacheReader.readParam` returns the legacy `ParamType` (not
+  1017→  `OsrsParamType` — not yet ported). OSRS-native params will be
+  1018→  recorded with `note: 'param type unknown — value not walked'`.
+  1019→- Script scanning only finds `.rs2` files that already exist in
+  1020→  LostCity's `content/scripts/npc/scripts/` dir. OSRS-native combat
+  1021→  scripts won't exist there until they're ported — the tracer
+  1022→  records the script name as a missing dep so the importer knows to
+  1023→  expect one.
+  1024→
+  1025→### Next-action hooks for downstream tasks
+  1026→- **Task 7 (OpenRS2 packing/cache port):** implement `CacheReader`
+  1027→  against the real OSRS cache. See the interface signature above.
+  1028→  Load `AnimBase`s into the shared `AnimBase.instances[]` registry
+  1029→  BEFORE returning frames (see task 5-b worklog entry for why).
+  1030→- **Task 8 (content-folder writer):** populate `transformedFrom`
+  1031→  when emitting 377 twins of OSRS nodes. Swap `CacheReader.readObj`
+  1032→  return type to `OsrsObjType` once ported, then implement the
+  1033→  deep obj walk in `visitObj`. Resolve script-discovered string IDs
+  1034→  (asset debugnames) to numeric cache IDs via `SeqPack`/`ObjPack`/
+  1035→  `ParamPack`/`SynthPack`/`SpotAnimPack` lookups.
+  1036→- **Task 9 (variant registry):** the registry's `resolveModel()`
+  1037→  can consult `DepsMap.nodes[\`model:${id}\`].skins` to prefer
+  1038→  non-skinned models when picking which variant to serve.
+  1039→- **Task 10 (pilot: Tormented Demon):** run
+  1040→  `bun tools/osrs/Trace.ts --npc=<td_id> --osrs-cache=./data/osrs-cache`
+  1041→  to produce the pilot deps.json. Verify no missing deps before
+  1042→  handing off to task 8.
+  1043→- **Task 11 (Kalphite Queen):** the `multinpc[]` walk in `visitNpc`
+  1044→  recurses into form-swap NPCs automatically. Verify the cycle
+  1045→  detection engages if form A's multinpc[] points back at form A
+  1046→  (it shouldn't, but defensive).
+  1047→
+  1048→---
+  1049→
+  1050→## Task 7 — OpenRS2 packing/compression port → TS
+  1051→**Agent:** OsrsCachePort
+  1052→**Status:** done
+  1053→
+  1054→### Files created (Part A/B/C + self-test)
+  1055→- `engine/src/cache/osrs/OsrsCacheReader.ts` (~695 lines) — Part A: low-level
+  1056→  JS5 cache reader. Consumes a real OSRS cache dump
+  1057→  (`main_file_cache.dat2` + `main_file_cache.idx0..255`). Handles
+  1058→  sector-walking, container decompression (NONE / BZIP2 / GZIP), master
+  1059→  index (idx255) parsing via OSRS protocol 5/6/7, and multi-child archive
+  1060→  splitting (the "striped chunk" format used by config bundles).
+  1061→- `engine/src/cache/osrs/OsrsCacheAssetReader.ts` (~578 lines) — Part B:
+  1062→  implements the `CacheReader` interface from
+  1063→  `engine/tools/osrs/DependencyTracer.ts` (Task 6). Wraps an
+  1064→  `OsrsCacheReader` and decodes each asset type using the OSRS decoders
+  1065→  from Tasks 5-a/5-b/5-c.
+  1066→- `engine/src/cache/osrs/LegacyCacheWriter.ts` (~220 lines) — Part C: thin
+  1067→  wrapper around the existing `FileStream` (377 cache writer) that emits
+  1068→  transformed 377-compatible bytes into the right archive slots. Used by
+  1069→  Task 8 to emit the output of `OsrsModel.toLegacy377()` etc.
+  1070→- `engine/tools/osrs/SelfTestCache.ts` (~142 lines) — dev-only self-test.
+  1071→  Run with `bun tools/osrs/SelfTestCache.ts`. Verifies graceful failure
+  1072→  on missing cache dir + `LegacyCacheWriter` round-trip.
+  1073→- `engine/tools/osrs/Trace.ts` (modified, +10/-5 lines) — wired up the
+  1074→  `--osrs-cache=<dir>` flag to construct an `OsrsCacheAssetReader`
+  1075→  instead of the placeholder `NullCacheReader`. Falls back to
+  1076→  `NullCacheReader` if the cache dir can't be opened.
+  1077→
+  1078→### Public API
+  1079→
+  1080→#### `OsrsCacheReader` (Part A)
+  1081→```ts
+  1082→class OsrsCacheReader {
+  1083→    constructor(cacheDir: string);             // never throws
+  1084→    get isAvailable(): boolean;
+  1085→    get dir(): string;
+  1086→    count(archive: number): number;
+  1087→    has(archive: number, file: number): boolean;
+  1088→    read(archive: number, file: number): Uint8Array | null;
+  1089→    readRaw(archive: number, file: number): { data: Uint8Array; version: number } | null;
+  1090→    readArchive(archive: number, file: number): ArchiveReadResult | null;
+  1091→    readIndex255(): Index255Entry[];
+  1092→    close(): void;
+  1093→}
+  1094→
+  1095→interface Index255Entry {
+  1096→    archive: number;
+  1097→    crc: number;
+  1098→    version: number;
+  1099→    nameHash: number;
+  1100→    childCount: number;
+  1101→    childIds: number[];
+  1102→    childNameHashes: number[];   // per-child name hash (parallel to childIds)
+  1103→}
+  1104→
+  1105→interface ArchiveReadResult {
+  1106→    children: Map<number, Uint8Array>;
+  1107→}
+  1108→```
+  1109→
+  1110→#### `OsrsCacheAssetReader` (Part B) — implements `CacheReader` from Task 6
+  1111→```ts
+  1112→class OsrsCacheAssetReader implements CacheReader {
+  1113→    constructor(cacheDir: string);
+  1114→    get raw(): OsrsCacheReader;
+  1115→    get available(): boolean;
+  1116→    readModel(id: number): OsrsModel | null;
+  1117→    readAnim(id: number): OsrsAnimFrame | null;
+  1118→    readAnimBase(id: number): AnimBase | null;
+  1119→    readSeq(id: number): OsrsSeqType | null;
+  1120→    readNpc(id: number): OsrsNpcType | null;
+  1121→    readObj(id: number): ObjType | null;       // stub — see "Limitations" below
+  1122→    readParam(id: number): ParamType | null;   // stub — returns null
+  1123→    readStruct(id: number): StructType | null; // stub — returns null
+  1124→    readTexture(id: number): Uint8Array | null;
+  1125→    readParticle(id: number): Uint8Array | null;   // stub — returns null
+  1126→    readSound(id: number): Uint8Array | null;      // stub — returns null
+  1127→    getName?(kind: NodeKind, id: number | string): string | null;
+  1128→}
+  1129→```
+  1130→
+  1131→**CacheReader interface match (Task 6 signature confirmation):** YES —
+  1132→the interface declared in `engine/tools/osrs/DependencyTracer.ts:48-97`
+  1133→is implemented verbatim. All 11 methods + the optional `getName` are
+  1134→present. The `NodeKind` import comes from `DepsSchema.ts` (Task 6).
+  1135→TypeScript confirms the match: `bunx tsc --noEmit` reports zero errors
+  1136→for `OsrsCacheAssetReader.ts`.
+  1137→
+  1138→#### `LegacyCacheWriter` (Part C)
+  1139→```ts
+  1140→class LegacyCacheWriter {
+  1141→    constructor(cacheDir: string);  // creates dir + empty cache files if missing
+  1142→    get raw(): FileStream;
+  1143→    get dir(): string;
+  1144→    writeModel(id: number, legacyBytes: Uint8Array, version?: number): void;  // archive 1
+  1145→    writeAnim(id: number, legacyBytes: Uint8Array, version?: number): void;   // archive 2
+  1146→    writeNpcConfig(npcDat: Uint8Array, npcIdx: Uint8Array): void;             // archive 0 file 2
+  1147→    writeConfigJagfile(jagPath: string): void;                                 // advanced
+  1148→    readModelForTest(id: number): Uint8Array | null;
+  1149→    readAnimForTest(id: number): Uint8Array | null;
+  1150→    readConfigJagfileForTest(): Uint8Array | null;
+  1151→}
+  1152→```
+  1153→
+  1154→### JS5 archive → content mapping assumed
+  1155→
+  1156→The OSRS cache uses this layout (post-rev ~150 era, stable across modern
+  1157→dumps). The reader hard-codes these constants in
+  1158→`OsrsCacheAssetReader.ts`:
+  1159→
+  1160→| Archive | Contents | Used by |
+  1161→|---------|----------|---------|
+  1162→| 0       | Animations (frames AND skeletons, disjoint file IDs) | `readAnim` + `readAnimBase` |
+  1163→| 1       | Models (one `.ob2` per file ID) | `readModel` |
+  1164→| 2       | Music — older OSRS dumps use this for config (fallback) | `ensureConfigChildren` fallback |
+  1165→| 5       | Textures (older) — fallback | `readTexture` fallback |
+  1166→| 9       | Configs (multi-child bundle: `npc.dat`, `seq.dat`, etc.) | `readNpc`/`readSeq`/etc. (primary) |
+  1167→| 11      | Textures (modern) | `readTexture` primary |
+  1168→| 25      | Audio (synth sound effects) | `readSound` (stub — not yet read) |
+  1169→
+  1170→The config bundle (`npc.dat`/`seq.dat`/`obj.dat`/etc.) is loaded from
+  1171→archive 9 by default, with a fallback to archive 2 for older cache
+  1172→dumps. Child names are resolved via the master index's per-child name
+  1173→hashes (using the same `genHash()` algorithm as `Jagfile.ts`). If the
+  1174→master index doesn't have name hashes, a sequential fallback is used.
+  1175→
+  1176→### BZIP2 path notes
+  1177→
+  1178→The OSRS BZIP2 path uses the existing `BZip2` wasm wrapper at
+  1179→`engine/src/io/BZip2.ts` (already used by `Jagfile.ts`). OSRS strips
+  1180→the leading `BZh1` magic from BZIP2-compressed container payloads; we
+  1181→restore it via `BZip2.decompress(payload, uncompressedLength,
+  1182→prependHeader=true)`. No external `bunzip2` calls needed.
+  1183→
+  1184→GZIP path uses the existing `decompressGz` from `engine/src/io/GZip.ts`.
+  1185→
+  1186→### Limitations / stubs
+  1187→
+  1188→1. **`readObj`** returns a STUB `ObjType(id)` with only the ID populated
+  1189→   — the legacy `ObjType.decode()` calls `printFatalError` (which calls
+  1190→   `process.exit(1)`) on unrecognized opcodes, and OSRS obj configs use
+  1191→   opcodes the 377 decoder doesn't know. The dep tracer treats objs as
+  1192→   leaves anyway (Task 6 worklog item 7). Swap to a real decode once
+  1193→   `OsrsObjType` is ported (Task 8+).
+  1194→
+  1195→2. **`readParam` / `readStruct`** return null — the legacy decoders
+  1196→   `throw` on unrecognized opcodes (OSRS uses new codes). The dep
+  1197→   tracer falls back to the legacy 377 `ParamType.get(id)` /
+  1198→   `StructType.get(id)` static registries when these return null,
+  1199→   which is the documented behavior in the Task 6 worklog.
+  1200→
+  1201→3. **`readParticle` / `readSound`** return null — OSRS particle systems
+  1202→   and sound formats are complex and undocumented. The dep tracer
+  1203→   records these as missing leaves, which is fine for the pilot.
+  1204→
+  1205→4. **`readAnimBase`** assumes skeletons live in archive 0 (the same
+  1206→   archive as anim frames). This is correct for modern OSRS but may
+  1207→   differ in some cache revisions. If the base isn't found at
+  1208→   archive 0 file `id`, the method returns null.
+  1209→
+  1210→5. **Config bundle child-name resolution** uses the master index's
+  1211→   per-child name hashes. If the master index was written with
+  1212→   `named = false`, falls back to sequential child-ID assignment
+  1213→   based on the standard OSRS child ordering
+  1214→   (`npc.dat`, `npc.idx`, `seq.dat`, `seq.idx`, ...). This is
+  1215→   best-effort and may need adjustment for unusual cache dumps.
+  1216→
+  1217→6. **Master index reading** assumes the master index is stored as a
+  1218→   single compressed container at archive 255, file 0 (read via the
+  1219→   normal sector-walking protocol). The sector's archiveType byte is
+  1220→   NOT validated (only `id` and `part` are), to remain compatible
+  1221→   with both the `archive + 1` convention (used for normal archives)
+  1222→   and the `archiveType = 255` convention (sometimes used for the
+  1223→   master index). This matches OpenRS2's behavior.
+  1224→
+  1225→### Verification
+  1226→
+  1227→- `bun run lint`: 4 baseline errors (all in `src/io/Packet.ts`) + 15
+  1228→  baseline warnings (all pre-existing). Zero errors and zero warnings
+  1229→  in the four new files. No regression.
+  1230→
+  1231→- `bunx tsc --noEmit -p tsconfig.json`: zero TypeScript errors in the
+  1232→  new files. (Pre-existing errors in `OsrsModel.ts`,
+  1233→  `DependencyTracer.ts`, `SelfTest.ts` remain — all from Tasks 5-a/6,
+  1234→  not introduced by this task.)
+  1235→
+  1236→- `bun tools/osrs/SelfTestCache.ts`: all 29 assertions pass:
+  1237→  - Test 1: OsrsCacheReader against `/nonexistent/path/...` — 7
+  1238→    graceful-failure assertions (constructor doesn't throw; all reads
+  1239→    return null/empty).
+  1240→  - Test 2: OsrsCacheAssetReader against missing dir — 11 graceful-
+  1241→    failure assertions (all `readXxx` methods return null).
+  1242→  - Test 3: LegacyCacheWriter round-trip — 11 assertions (model
+  1243→    write+read bytes match exactly; anim write+read succeeds; config
+  1244→    jagfile write+read succeeds; config jagfile re-write merges
+  1245→    correctly).
+  1246→
+  1247→- `bun tools/osrs/SelfTest.ts`: Task 6 self-test still passes (14
+  1248→  nodes, 0 missing, 0 cycles). No regression.
+  1249→
+  1250→- `bun tools/osrs/Trace.ts --npc=9001 --osrs-cache=/nonexistent`:
+  1251→  emits a clear "cache could not be opened" warning and falls back to
+  1252→  NullCacheReader. Exits 0 with the expected 1-node missing-deps
+  1253→  output.
+  1254→
+  1255→### Next-action hooks for downstream tasks
+  1256→
+  1257→- **Task 8 (content-folder writer):** use `LegacyCacheWriter.writeModel(id,
+  1258→  osrsModel.toLegacy377(), 1)` to emit transformed OSRS models into the
+  1259→  377 cache. Use `LegacyCacheWriter.writeAnim(id, osrsAnimFrame.toLegacy377(),
+  1260→  1)` for anims. Use `LegacyCacheWriter.writeNpcConfig(npcDat, npcIdx)` to
+  1261→  write the re-packed `npc.dat`/`npc.idx` (built by merging existing 377
+  1262→  NPC configs with the transformed OSRS ones via
+  1263→  `OsrsNpcType.toLegacy377NpcConfig()`).
+  1264→
+  1265→- **Task 8 (continued):** when generating `npc.dat`/`npc.idx` bytes for
+  1266→  `writeNpcConfig`, use the existing
+  1267→  `engine/tools/pack/config/NpcConfig.ts:packNpcConfigs()` helper to
+  1268→  compile ini-style configs into the binary `npc.dat`/`npc.idx` format.
+  1269→  Pass the OSRS-transformed NPCs as `ConfigLine[]` entries.
+  1270→
+  1271→- **Task 9 (variant registry):** the registry's `resolveModel()` can
+  1272→  now use `OsrsCacheAssetReader.readModel(id)` to fetch OSRS model
+  1273→  bytes directly from the cache. The result is an `OsrsModel` instance
+  1274→  with all OSRS-only fields populated, ready for `toLegacy377()`.
+  1275→
+  1276→- **Task 10 (pilot: Tormented Demon):** run
+  1277→  `bun tools/osrs/Trace.ts --npc=<td_id> --osrs-cache=./data/osrs-cache`
+  1278→  to produce the pilot deps.json. With Task 7 in place, the tracer
+  1279→  will now actually decode the OSRS NPC config + walk its transitive
+  1280→  deps (models, anims, seqs) instead of recording everything as
+  1281→  missing.
+  1282→
+  1283→- **Future cleanup (Task 8+):** port `OsrsObjType` / `OsrsParamType` /
+  1284→  `OsrsStructType` and swap the corresponding `OsrsCacheAssetReader`
+  1285→  stubs to real decoders. The legacy `ObjType.decode()`'s
+  1286→  `printFatalError`-on-unknown-opcode behavior makes it unsafe to use
+  1287→  on OSRS data — the OSRS-native decoders should be tolerant of new
+  1288→  opcodes (read-and-warn vs. crash).
+  1289→

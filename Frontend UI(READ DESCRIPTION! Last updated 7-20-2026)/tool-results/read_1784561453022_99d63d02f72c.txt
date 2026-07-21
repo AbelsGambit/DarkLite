@@ -1,0 +1,822 @@
+     1→import Packet from '#/io/Packet.js';
+     2→import { printWarning } from '#/util/Logger.js';
+     3→
+     4→/**
+     5→ * OSRS model format metadata.
+     6→ *
+     7→ * Mirrors the role of the `Metadata` class in `cache/graphics/Model.ts` (377
+     8→ * path) but holds the larger set of OSRS trailer fields plus the computed
+     9→ * byte offsets of each body section.
+    10→ *
+    11→ * Trailer layout (last 23 bytes of the blob, decoded back-to-front):
+    12→ *   1.  version              : u8    (NEW vs 377 — feature gate)
+    13→ *   2.  vertexCount          : u16
+    14→ *   3.  triangleCount        : u16   (was `faceCount` in 377)
+    15→ *   4.  triangleTextureCount : u8    (was `texturedFaceCount` in 377)
+    16→ *   5.  hasFaceColors        : u8    (was `hasInfo` in 377; JS5 >= 6)
+    17→ *   6.  hasFaceTextures      : u8    (NEW; JS5 >= 6 — gates material section)
+    18→ *   7.  priority             : u8    (kept from 377; 255 = per-face priority)
+    19→ *   8.  hasFaceAlphas        : u8    (was `hasAlpha`)
+    20→ *   9.  hasTriangleTags      : u8    (was `hasFaceLabels`)
+    21→ *   10. hasVertexLabels      : u8
+    22→ *   11. dataLenVertexX       : u16
+    23→ *   12. dataLenVertexY       : u16
+    24→ *   13. dataLenVertexZ       : u16
+    25→ *   14. dataLenFaceOrientations : u16  (byte length of the vertex-index stream)
+    26→ *   15. triangleSkinCount    : u8    (NEW — only meaningful when version >= 1)
+    27→ *   16. vertexSkinCount      : u8    (NEW — only meaningful when version >= 1)
+    28→ *   17. maxDepth             : u8    (NEW — bounding-box hint)
+    29→ *
+    30→ * Total: 23 bytes (vs 18 for plain 377). 5 of those bytes are NEW vs 377
+    31→ * (`version`, `hasFaceTextures`, `triangleSkinCount`, `vertexSkinCount`,
+    32→ * `maxDepth`). When `version == 0` callers should fall back to the legacy
+    33→ * `cache/graphics/Model.ts` decoder which reads the 18-byte 377 trailer.
+    34→ *
+    35→ * Spec ambiguity: the task spec listed only 12 trailer fields (17 bytes) but
+    36→ * asserted the trailer is 23 bytes. We resolved this by keeping every 377
+    37→ * field (including `priority`, which the spec omitted) and adding the 5 NEW
+    38→ * bytes documented in the worklog. This both matches the 23-byte total and
+    39→ * gives `toLegacy377()` enough information to emit a faithful 377 file.
+    40→ */
+    41→export class OsrsModelMetadata {
+    42→    data: Uint8Array | null = null;
+    43→
+    44→    // trailer fields (read straight off the blob)
+    45→    version: number = 0;
+    46→    vertexCount: number = 0;
+    47→    triangleCount: number = 0;
+    48→    triangleTextureCount: number = 0;
+    49→    hasFaceColors: number = 0;
+    50→    hasFaceTextures: number = 0;
+    51→    priority: number = 0;
+    52→    hasFaceAlphas: number = 0;
+    53→    hasTriangleTags: number = 0;
+    54→    hasVertexLabels: number = 0;
+    55→    dataLenVertexX: number = 0;
+    56→    dataLenVertexY: number = 0;
+    57→    dataLenVertexZ: number = 0;
+    58→    dataLenFaceOrientations: number = 0;
+    59→    triangleSkinCount: number = 0;
+    60→    vertexSkinCount: number = 0;
+    61→    maxDepth: number = 0;
+    62→
+    63→    // computed section offsets (-1 = section absent)
+    64→    vertexFlagsOffset: number = -1;
+    65→    vertexXOffset: number = -1;
+    66→    vertexYOffset: number = -1;
+    67→    vertexZOffset: number = -1;
+    68→    vertexLabelsOffset: number = -1;
+    69→    triangleOrientationsOffset: number = -1;
+    70→    triangleColoursOffset: number = -1;
+    71→    triangleInfosOffset: number = -1;
+    72→    triangleMaterialsOffset: number = -1;
+    73→    triangleAlphasOffset: number = -1;
+    74→    triangleTagsOffset: number = -1;
+    75→    trianglePrioritiesOffset: number = -1;
+    76→    triangleVerticesOffset: number = -1;
+    77→    triangleTextureUvsOffset: number = -1;
+    78→    triangleSkinsOffset: number = -1;
+    79→    vertexSkinsOffset: number = -1;
+    80→}
+    81→
+    82→/**
+    83→ * OSRS model decoder.
+    84→ *
+    85→ * Ported from RuneLite's `ModelDefinition.java` (well-documented public
+    86→ * format; the implementation here follows the same field naming and decode
+    87→ * order as RuneLite/OpenRS2/rs2-cache).
+    88→ *
+    89→ * API-compatible in spirit with `cache/graphics/Model.ts` (the existing 377
+    90→ * decoder): a `Metadata` companion class holds section offsets, and a static
+    91→ * `decode(id, data)` factory does the work. Unlike the 377 decoder which
+    92→ * splits `unpack` (offset computation) from `fromId` (decode), this class
+    93→ * does both in a single `decode()` call — the OSRS decoder is intended for
+    94→ * one-shot pipeline use, not for runtime client caching.
+    95→ *
+    96→ * The class also exposes:
+    97→ *   - `static detect(data)`        : sniffs OSRS vs 377 blobs
+    98→ *   - `toLegacy377()`              : re-encodes as a 377 `.ob2` blob
+    99→ *                                    (transform stage of the pipeline)
+   100→ */
+   101→export default class OsrsModel {
+   102→    id: number;
+   103→
+   104→    // header / counts
+   105→    version: number = 0;
+   106→    vertexCount: number = 0;
+   107→    triangleCount: number = 0;
+   108→    triangleTextureCount: number = 0;
+   109→    maxDepth: number = 0;
+   110→
+   111→    // vertex data
+   112→    vertexX: Int32Array = new Int32Array(0);
+   113→    vertexY: Int32Array = new Int32Array(0);
+   114→    vertexZ: Int32Array = new Int32Array(0);
+   115→    vertexLabel: Int32Array | null = null;
+   116→    vertexSkin: Int32Array | null = null;
+   117→
+   118→    // triangle data
+   119→    triangleType: Uint8Array = new Uint8Array(0); // orientation byte (1/2/3/4)
+   120→    triangleColour: Uint16Array = new Uint16Array(0); // colour in low 15 bits
+   121→    triangleInfo: Int32Array | null = null;
+   122→    triangleMaterial: Int32Array | null = null;
+   123→    triangleAlpha: Int32Array | null = null;
+   124→    triangleTag: Int32Array | null = null;
+   125→    trianglePriority: Int32Array | null = null;
+   126→    priority: number = 0; // shared priority (when not per-face)
+   127→    triangleSkin: Int32Array | null = null;
+   128→
+   129→    // triangle vertex indices (A/B/C)
+   130→    triangleVertexA: Int32Array = new Int32Array(0);
+   131→    triangleVertexB: Int32Array = new Int32Array(0);
+   132→    triangleVertexC: Int32Array = new Int32Array(0);
+   133→
+   134→    // textured triangle UV vertex indices
+   135→    texturedVertexA: Int32Array | null = null;
+   136→    texturedVertexB: Int32Array | null = null;
+   137→    texturedVertexC: Int32Array | null = null;
+   138→
+   139→    private constructor(id: number) {
+   140→        this.id = id;
+   141→    }
+   142→
+   143→    /**
+   144→     * Decode an OSRS model blob. Returns `null` for null input or for blobs
+   145→     * that fail the trailer sanity checks. Callers should use `detect()`
+   146→     * first if they don't already know the blob is OSRS.
+   147→     */
+   148→    static decode(id: number, data: Uint8Array | null): OsrsModel | null {
+   149→        if (!data) {
+   150→            return null;
+   151→        }
+   152→        if (data.length < 23) {
+   153→            printWarning(`OsrsModel ${id}: blob too short (${data.length} bytes, need >= 23)`);
+   154→            return null;
+   155→        }
+   156→
+   157→        const meta = new OsrsModelMetadata();
+   158→        meta.data = data;
+   159→
+   160→        // ---- read trailer (last 23 bytes) ----
+   161→        const trailer = new Packet(data);
+   162→        trailer.pos = data.length - 23;
+   163→        meta.version = trailer.g1();
+   164→        meta.vertexCount = trailer.g2();
+   165→        meta.triangleCount = trailer.g2();
+   166→        meta.triangleTextureCount = trailer.g1();
+   167→        meta.hasFaceColors = trailer.g1();
+   168→        meta.hasFaceTextures = trailer.g1();
+   169→        meta.priority = trailer.g1();
+   170→        meta.hasFaceAlphas = trailer.g1();
+   171→        meta.hasTriangleTags = trailer.g1();
+   172→        meta.hasVertexLabels = trailer.g1();
+   173→        meta.dataLenVertexX = trailer.g2();
+   174→        meta.dataLenVertexY = trailer.g2();
+   175→        meta.dataLenVertexZ = trailer.g2();
+   176→        meta.dataLenFaceOrientations = trailer.g2();
+   177→        meta.triangleSkinCount = trailer.g1();
+   178→        meta.vertexSkinCount = trailer.g1();
+   179→        meta.maxDepth = trailer.g1();
+   180→
+   181→        if (meta.version < 1) {
+   182→            // version 0 = legacy 377 path; the caller should have used Model.ts
+   183→            // but we still attempt the OSRS decode if the structure looks sane.
+   184→            printWarning(`OsrsModel ${id}: version=${meta.version}, expected >= 1 for OSRS`);
+   185→        }
+   186→
+   187→        // sanity: counts must fit in the blob
+   188→        const expectedMin =
+   189→            meta.vertexCount + // vertex flags
+   190→            meta.dataLenVertexX +
+   191→            meta.dataLenVertexY +
+   192→            meta.dataLenVertexZ +
+   193→            meta.triangleCount + // orientation bytes
+   194→            meta.triangleCount * 2 + // colours
+   195→            meta.dataLenFaceOrientations +
+   196→            meta.triangleTextureCount * 6;
+   197→        if (expectedMin > data.length - 23) {
+   198→            printWarning(
+   199→                `OsrsModel ${id}: trailer lengths (${expectedMin}) exceed body (${data.length - 23})`
+   200→            );
+   201→            return null;
+   202→        }
+   203→
+   204→        const model = new OsrsModel(id);
+   205→        model.version = meta.version;
+   206→        model.vertexCount = meta.vertexCount;
+   207→        model.triangleCount = meta.triangleCount;
+   208→        model.triangleTextureCount = meta.triangleTextureCount;
+   209→        model.maxDepth = meta.maxDepth;
+   210→
+   211→        // allocate typed arrays
+   212→        model.vertexX = new Int32Array(model.vertexCount);
+   213→        model.vertexY = new Int32Array(model.vertexCount);
+   214→        model.vertexZ = new Int32Array(model.vertexCount);
+   215→        model.triangleType = new Uint8Array(model.triangleCount);
+   216→        model.triangleColour = new Uint16Array(model.triangleCount);
+   217→        model.triangleVertexA = new Int32Array(model.triangleCount);
+   218→        model.triangleVertexB = new Int32Array(model.triangleCount);
+   219→        model.triangleVertexC = new Int32Array(model.triangleCount);
+   220→
+   221→        if (meta.hasVertexLabels === 1) {
+   222→            model.vertexLabel = new Int32Array(model.vertexCount);
+   223→        }
+   224→        if (meta.hasFaceColors === 1) {
+   225→            model.triangleInfo = new Int32Array(model.triangleCount);
+   226→        }
+   227→        if (meta.hasFaceTextures === 1) {
+   228→            model.triangleMaterial = new Int32Array(model.triangleCount);
+   229→        }
+   230→        if (meta.hasFaceAlphas === 1) {
+   231→            model.triangleAlpha = new Int32Array(model.triangleCount);
+   232→        }
+   233→        if (meta.hasTriangleTags === 1) {
+   234→            model.triangleTag = new Int32Array(model.triangleCount);
+   235→        }
+   236→        if (meta.priority === 255) {
+   237→            model.trianglePriority = new Int32Array(model.triangleCount);
+   238→        } else {
+   239→            model.priority = meta.priority;
+   240→        }
+   241→        if (meta.triangleTextureCount > 0) {
+   242→            model.texturedVertexA = new Int32Array(meta.triangleTextureCount);
+   243→            model.texturedVertexB = new Int32Array(meta.triangleTextureCount);
+   244→            model.texturedVertexC = new Int32Array(meta.triangleTextureCount);
+   245→        }
+   246→        if (meta.version >= 1 && meta.triangleSkinCount > 0) {
+   247→            model.triangleSkin = new Int32Array(meta.triangleSkinCount);
+   248→        }
+   249→        if (meta.version >= 1 && meta.vertexSkinCount > 0) {
+   250→            model.vertexSkin = new Int32Array(meta.vertexSkinCount);
+   251→        }
+   252→
+   253→        // ---- compute section offsets ----
+   254→        // Body order (per spec, with one explicit addition for the orientation
+   255→        // bytes — see spec-ambiguity note on OsrsModelMetadata):
+   256→        //   1.  vertex flags
+   257→        //   2.  vertex X (smart-encoded deltas)
+   258→        //   3.  vertex Y
+   259→        //   4.  vertex Z
+   260→        //   5.  vertex labels             (if hasVertexLabels)
+   261→        //   5.5 triangle orientation bytes (1/face — same as 377 faceOrientations)
+   262→        //   6.  triangle colours (u16/face)
+   263→        //   7.  triangle info              (if hasFaceColors)
+   264→        //   8.  triangle materials         (if hasFaceTextures)
+   265→        //   9.  triangle alphas            (if hasFaceAlphas)
+   266→        //   10. triangle tags              (if hasTriangleTags)
+   267→        //   10.5 triangle priorities       (if priority == 255)
+   268→        //   11. triangle vertex indices    (smart-encoded; dataLenFaceOrientations bytes)
+   269→        //   12. triangle texture UVs       (if triangleTextureCount > 0)
+   270→        //   13. triangle skins             (if version>=1 && triangleSkinCount>0)
+   271→        //   14. vertex skins               (if version>=1 && vertexSkinCount>0)
+   272→        let pos: number = 0;
+   273→
+   274→        meta.vertexFlagsOffset = pos;
+   275→        pos += meta.vertexCount;
+   276→
+   277→        meta.vertexXOffset = pos;
+   278→        pos += meta.dataLenVertexX;
+   279→
+   280→        meta.vertexYOffset = pos;
+   281→        pos += meta.dataLenVertexY;
+   282→
+   283→        meta.vertexZOffset = pos;
+   284→        pos += meta.dataLenVertexZ;
+   285→
+   286→        if (meta.hasVertexLabels === 1) {
+   287→            meta.vertexLabelsOffset = pos;
+   288→            pos += meta.vertexCount;
+   289→        } else {
+   290→            meta.vertexLabelsOffset = -1;
+   291→        }
+   292→
+   293→        // 5.5 orientation bytes (always present — needed for vertex-index decode)
+   294→        meta.triangleOrientationsOffset = pos;
+   295→        pos += meta.triangleCount;
+   296→
+   297→        meta.triangleColoursOffset = pos;
+   298→        pos += meta.triangleCount * 2;
+   299→
+   300→        if (meta.hasFaceColors === 1) {
+   301→            meta.triangleInfosOffset = pos;
+   302→            pos += meta.triangleCount;
+   303→        } else {
+   304→            meta.triangleInfosOffset = -1;
+   305→        }
+   306→
+   307→        if (meta.hasFaceTextures === 1) {
+   308→            meta.triangleMaterialsOffset = pos;
+   309→            pos += meta.triangleCount;
+   310→        } else {
+   311→            meta.triangleMaterialsOffset = -1;
+   312→        }
+   313→
+   314→        if (meta.hasFaceAlphas === 1) {
+   315→            meta.triangleAlphasOffset = pos;
+   316→            pos += meta.triangleCount;
+   317→        } else {
+   318→            meta.triangleAlphasOffset = -1;
+   319→        }
+   320→
+   321→        if (meta.hasTriangleTags === 1) {
+   322→            meta.triangleTagsOffset = pos;
+   323→            pos += meta.triangleCount;
+   324→        } else {
+   325→            meta.triangleTagsOffset = -1;
+   326→        }
+   327→
+   328→        if (meta.priority === 255) {
+   329→            meta.trianglePrioritiesOffset = pos;
+   330→            pos += meta.triangleCount;
+   331→        } else {
+   332→            // 377-style negative-offset trick encodes the shared priority
+   333→            meta.trianglePrioritiesOffset = -meta.priority - 1;
+   334→        }
+   335→
+   336→        meta.triangleVerticesOffset = pos;
+   337→        pos += meta.dataLenFaceOrientations;
+   338→
+   339→        meta.triangleTextureUvsOffset = pos;
+   340→        pos += meta.triangleTextureCount * 6;
+   341→
+   342→        if (meta.version >= 1 && meta.triangleSkinCount > 0) {
+   343→            meta.triangleSkinsOffset = pos;
+   344→            pos += meta.triangleSkinCount;
+   345→        } else {
+   346→            meta.triangleSkinsOffset = -1;
+   347→        }
+   348→
+   349→        if (meta.version >= 1 && meta.vertexSkinCount > 0) {
+   350→            meta.vertexSkinsOffset = pos;
+   351→            pos += meta.vertexSkinCount;
+   352→        } else {
+   353→            meta.vertexSkinsOffset = -1;
+   354→        }
+   355→
+   356→        // ---- decode vertices ----
+   357→        const flagsBuf = new Packet(data);
+   358→        flagsBuf.pos = meta.vertexFlagsOffset;
+   359→        const xBuf = new Packet(data);
+   360→        xBuf.pos = meta.vertexXOffset;
+   361→        const yBuf = new Packet(data);
+   362→        yBuf.pos = meta.vertexYOffset;
+   363→        const zBuf = new Packet(data);
+   364→        zBuf.pos = meta.vertexZOffset;
+   365→        const labelBuf = new Packet(data);
+   366→        labelBuf.pos = meta.vertexLabelsOffset;
+   367→
+   368→        let dx: number = 0;
+   369→        let dy: number = 0;
+   370→        let dz: number = 0;
+   371→        for (let v: number = 0; v < model.vertexCount; v++) {
+   372→            const flags: number = flagsBuf.g1();
+   373→            const ax: number = (flags & 0x1) !== 0 ? xBuf.gsmart() : 0;
+   374→            const ay: number = (flags & 0x2) !== 0 ? yBuf.gsmart() : 0;
+   375→            const az: number = (flags & 0x4) !== 0 ? zBuf.gsmart() : 0;
+   376→            model.vertexX[v] = dx + ax;
+   377→            model.vertexY[v] = dy + ay;
+   378→            model.vertexZ[v] = dz + az;
+   379→            dx = model.vertexX[v];
+   380→            dy = model.vertexY[v];
+   381→            dz = model.vertexZ[v];
+   382→            if (model.vertexLabel !== null) {
+   383→                model.vertexLabel[v] = labelBuf.g1();
+   384→            }
+   385→        }
+   386→
+   387→        // ---- decode per-triangle scalars ----
+   388→        const oriBuf = new Packet(data);
+   389→        oriBuf.pos = meta.triangleOrientationsOffset;
+   390→        const colBuf = new Packet(data);
+   391→        colBuf.pos = meta.triangleColoursOffset;
+   392→        const infoBuf = new Packet(data);
+   393→        infoBuf.pos = meta.triangleInfosOffset;
+   394→        const matBuf = new Packet(data);
+   395→        matBuf.pos = meta.triangleMaterialsOffset;
+   396→        const alphaBuf = new Packet(data);
+   397→        alphaBuf.pos = meta.triangleAlphasOffset;
+   398→        const tagBuf = new Packet(data);
+   399→        tagBuf.pos = meta.triangleTagsOffset;
+   400→        const priBuf = new Packet(data);
+   401→        priBuf.pos = meta.trianglePrioritiesOffset;
+   402→
+   403→        for (let t: number = 0; t < model.triangleCount; t++) {
+   404→            model.triangleType[t] = oriBuf.g1();
+   405→            model.triangleColour[t] = colBuf.g2();
+   406→            if (model.triangleInfo !== null) {
+   407→                model.triangleInfo[t] = infoBuf.g1();
+   408→            }
+   409→            if (model.triangleMaterial !== null) {
+   410→                model.triangleMaterial[t] = matBuf.g1();
+   411→            }
+   412→            if (model.triangleAlpha !== null) {
+   413→                model.triangleAlpha[t] = alphaBuf.g1();
+   414→            }
+   415→            if (model.triangleTag !== null) {
+   416→                model.triangleTag[t] = tagBuf.g1();
+   417→            }
+   418→            if (model.trianglePriority !== null) {
+   419→                model.trianglePriority[t] = priBuf.g1();
+   420→            }
+   421→        }
+   422→
+   423→        // ---- decode triangle vertex indices (1/2/3/4 type encoding, same as 377) ----
+   424→        const vertBuf = new Packet(data);
+   425→        vertBuf.pos = meta.triangleVerticesOffset;
+   426→        let a: number = 0;
+   427→        let b: number = 0;
+   428→        let c: number = 0;
+   429→        let last: number = 0;
+   430→        for (let t: number = 0; t < model.triangleCount; t++) {
+   431→            const type: number = model.triangleType[t];
+   432→            if (type === 1) {
+   433→                a = vertBuf.gsmart() + last;
+   434→                b = vertBuf.gsmart() + a;
+   435→                c = vertBuf.gsmart() + b;
+   436→                last = c;
+   437→            } else if (type === 2) {
+   438→                // a unchanged, b takes previous c, c = delta + last
+   439→                b = c;
+   440→                c = vertBuf.gsmart() + last;
+   441→                last = c;
+   442→            } else if (type === 3) {
+   443→                // a takes previous c, b unchanged, c = delta + last
+   444→                a = c;
+   445→                c = vertBuf.gsmart() + last;
+   446→                last = c;
+   447→            } else if (type === 4) {
+   448→                // swap a and b, c = delta + last
+   449→                const tmp: number = a;
+   450→                a = b;
+   451→                b = tmp;
+   452→                c = vertBuf.gsmart() + last;
+   453→                last = c;
+   454→            } else {
+   455→                // Unknown type — fall back to type-1 (read 3 fresh deltas) so
+   456→                // we don't lose sync with the smart stream. This is a best-
+   457→                // effort recovery; the model may render incorrectly.
+   458→                printWarning(
+   459→                    `OsrsModel ${id}: triangle ${t} has unknown orientation ${type}; falling back to type 1`
+   460→                );
+   461→                a = vertBuf.gsmart() + last;
+   462→                b = vertBuf.gsmart() + a;
+   463→                c = vertBuf.gsmart() + b;
+   464→                last = c;
+   465→            }
+   466→            model.triangleVertexA[t] = a;
+   467→            model.triangleVertexB[t] = b;
+   468→            model.triangleVertexC[t] = c;
+   469→        }
+   470→
+   471→        // ---- decode triangle texture UVs ----
+   472→        if (meta.triangleTextureCount > 0 && model.texturedVertexA !== null) {
+   473→            const uvBuf = new Packet(data);
+   474→            uvBuf.pos = meta.triangleTextureUvsOffset;
+   475→            for (let t: number = 0; t < meta.triangleTextureCount; t++) {
+   476→                model.texturedVertexA[t] = uvBuf.g2();
+   477→                model.texturedVertexB[t] = uvBuf.g2();
+   478→                model.texturedVertexC[t] = uvBuf.g2();
+   479→            }
+   480→        }
+   481→
+   482→        // ---- decode triangle skins ----
+   483→        if (model.triangleSkin !== null) {
+   484→            const skinBuf = new Packet(data);
+   485→            skinBuf.pos = meta.triangleSkinsOffset;
+   486→            for (let i: number = 0; i < meta.triangleSkinCount; i++) {
+   487→                model.triangleSkin[i] = skinBuf.g1();
+   488→            }
+   489→        }
+   490→
+   491→        // ---- decode vertex skins ----
+   492→        if (model.vertexSkin !== null) {
+   493→            const skinBuf = new Packet(data);
+   494→            skinBuf.pos = meta.vertexSkinsOffset;
+   495→            for (let i: number = 0; i < meta.vertexSkinCount; i++) {
+   496→                model.vertexSkin[i] = skinBuf.g1();
+   497→            }
+   498→        }
+   499→
+   500→        return model;
+   501→    }
+   502→
+   503→    /**
+   504→     * Sniff whether a model blob is OSRS (23-byte trailer with version >= 1)
+   505→     * or legacy 377 (18-byte trailer, no version byte).
+   506→     *
+   507→     * Heuristics:
+   508→     *   - blobs shorter than 23 bytes -> legacy377
+   509→     *   - version byte at data.length-23 must be in [1..255]
+   510→     *   - vertexCount and triangleCount read from the candidate trailer
+   511→     *     must be plausible (non-zero, < 100k)
+   512→     *   - derived minimum body length must fit inside data.length - 23
+   513→     *
+   514→     * Anything that fails the heuristic is treated as legacy377, which is the
+   515→     * safe default — the legacy decoder will then either succeed or report
+   516→     * its own decode error.
+   517→     */
+   518→    static detect(data: Uint8Array): 'osrs' | 'legacy377' {
+   519→        if (data.length < 23) {
+   520→            return 'legacy377';
+   521→        }
+   522→
+   523→        const base: number = data.length - 23;
+   524→        const version: number = data[base];
+   525→        if (version < 1) {
+   526→            return 'legacy377';
+   527→        }
+   528→
+   529→        const vertexCount: number = (data[base + 1] << 8) | data[base + 2];
+   530→        const triangleCount: number = (data[base + 3] << 8) | data[base + 4];
+   531→        if (vertexCount === 0 || triangleCount === 0) {
+   532→            return 'legacy377';
+   533→        }
+   534→        if (vertexCount > 100000 || triangleCount > 100000) {
+   535→            return 'legacy377';
+   536→        }
+   537→
+   538→        // dataLenVertexX/Y/Z and dataLenFaceOrientations live at base+12..base+19
+   539→        // (after version(1) + vertexCount(2) + triangleCount(2) + triangleTextureCount(1)
+   540→        //  + hasFaceColors(1) + hasFaceTextures(1) + priority(1) + hasFaceAlphas(1)
+   541→        //  + hasTriangleTags(1) + hasVertexLabels(1) = 12 bytes)
+   542→        const dataLenX: number = (data[base + 12] << 8) | data[base + 13];
+   543→        const dataLenY: number = (data[base + 14] << 8) | data[base + 15];
+   544→        const dataLenZ: number = (data[base + 16] << 8) | data[base + 17];
+   545→        const dataLenFaceOrientations: number = (data[base + 18] << 8) | data[base + 19];
+   546→
+   547→        const minBody: number =
+   548→            vertexCount + // vertex flags
+   549→            dataLenX +
+   550→            dataLenY +
+   551→            dataLenZ +
+   552→            triangleCount + // orientation bytes
+   553→            triangleCount * 2 + // colours
+   554→            dataLenFaceOrientations;
+   555→        if (minBody > data.length - 23) {
+   556→            return 'legacy377';
+   557→        }
+   558→
+   559→        return 'osrs';
+   560→    }
+   561→
+   562→    /**
+   563→     * Re-encode this OSRS model as a 377 `.ob2` blob.
+   564→     *
+   565→     * This is the **transform stage** of the pipeline: it lets us emit a
+   566→     * 377-compatible cache file from an OSRS source so the existing Java
+   567→     * client can render it without modification.
+   568→     *
+   569→     * The 377 format has no concept of:
+   570→     *   - triangle materials (OSRS-only — dropped)
+   571→     *   - triangle skins     (OSRS-only — dropped)
+   572→     *   - vertex skins       (OSRS-only — dropped)
+   573→     *   - per-texture UVs    (377 stores 3 vertex indices per textured face,
+   574→     *                         same field shape, so we KEEP these)
+   575→     *
+   576→     * Limitations:
+   577→     *   - Skinning data is lost. Animations that depend on vertex/triangle
+   578→     *     skins for rig-based animation will not animate correctly when
+   579→     *     rendered through the 377 client. The dependency tracer (task 6)
+   580→     *     must flag such models so the pilot can avoid them.
+   581→     *   - Material textures are lost. Faces with `triangleMaterial != 0`
+   582→     *     will fall back to flat-shaded colour rendering.
+   583→     *   - The orientation byte is preserved verbatim so the 1/2/3/4 type
+   584→     *     encoding survives round-trip.
+   585→     *   - `maxDepth` is dropped (377 has no equivalent).
+   586→     *
+   587→     * Output is a fresh Uint8Array — the original OSRS blob is not modified.
+   588→     */
+   589→    toLegacy377(): Uint8Array {
+   590→        const vc: number = this.vertexCount;
+   591→        const tc: number = this.triangleCount;
+   592→        const tfc: number = this.triangleTextureCount;
+   593→
+   594→        // ---- re-encode vertex deltas & recompute data lengths ----
+   595→        // For each axis: flag bit is set iff the delta is non-zero.
+   596→        // Delta is encoded as a signed smart (1 byte for [-64..63], 2 bytes
+   597→        // for [-16384..16383]). LostCity's Packet.psmart only handles
+   598→        // non-negative values, so we use a local helper below.
+   599→        const flagBytes: Uint8Array = new Uint8Array(vc);
+   600→        const xBytes: number[] = [];
+   601→        const yBytes: number[] = [];
+   602→        const zBytes: number[] = [];
+   603→
+   604→        let prevX: number = 0;
+   605→        let prevY: number = 0;
+   606→        let prevZ: number = 0;
+   607→        for (let v: number = 0; v < vc; v++) {
+   608→            const dx: number = this.vertexX[v] - prevX;
+   609→            const dy: number = this.vertexY[v] - prevY;
+   610→            const dz: number = this.vertexZ[v] - prevZ;
+   611→            let flag: number = 0;
+   612→            if (dx !== 0) {
+   613→                flag |= 0x1;
+   614→                psmartSigned(xBytes, dx);
+   615→            }
+   616→            if (dy !== 0) {
+   617→                flag |= 0x2;
+   618→                psmartSigned(yBytes, dy);
+   619→            }
+   620→            if (dz !== 0) {
+   621→                flag |= 0x4;
+   622→                psmartSigned(zBytes, dz);
+   623→            }
+   624→            flagBytes[v] = flag;
+   625→            prevX = this.vertexX[v];
+   626→            prevY = this.vertexY[v];
+   627→            prevZ = this.vertexZ[v];
+   628→        }
+   629→
+   630→        const dataLenX: number = xBytes.length;
+   631→        const dataLenY: number = yBytes.length;
+   632→        const dataLenZ: number = zBytes.length;
+   633→
+   634→        // ---- re-encode triangle vertex indices & recompute data length ----
+   635→        const oriBytes: Uint8Array = new Uint8Array(tc);
+   636→        const idxBytes: number[] = [];
+   637→        let last: number = 0;
+   638→        for (let t: number = 0; t < tc; t++) {
+   639→            const type: number = this.triangleType[t];
+   640→            oriBytes[t] = type;
+   641→            const a: number = this.triangleVertexA[t];
+   642→            const b: number = this.triangleVertexB[t];
+   643→            const c: number = this.triangleVertexC[t];
+   644→            if (type === 1) {
+   645→                psmartSigned(idxBytes, a - last);
+   646→                psmartSigned(idxBytes, b - a);
+   647→                psmartSigned(idxBytes, c - b);
+   648→            } else if (type === 2 || type === 3 || type === 4) {
+   649→                // types 2/3/4 reuse previous indices and emit one delta
+   650→                psmartSigned(idxBytes, c - last);
+   651→            } else {
+   652→                // fall back to type 1 (3 deltas) — matches decode fallback
+   653→                oriBytes[t] = 1;
+   654→                psmartSigned(idxBytes, a - last);
+   655→                psmartSigned(idxBytes, b - a);
+   656→                psmartSigned(idxBytes, c - b);
+   657→            }
+   658→            last = c;
+   659→        }
+   660→        const dataLenFaceOrientations: number = idxBytes.length;
+   661→
+   662→        // ---- 377 trailer flags ----
+   663→        // We preserve: hasInfo (faceInfo), priority, hasAlpha, hasFaceLabels,
+   664→        //              hasVertexLabels.
+   665→        // We drop:    hasFaceTextures (377 has no material section).
+   666→        const hasInfo: number = this.triangleInfo !== null ? 1 : 0;
+   667→        const hasAlpha: number = this.triangleAlpha !== null ? 1 : 0;
+   668→        const hasFaceLabels: number = this.triangleTag !== null ? 1 : 0;
+   669→        const hasVertexLabels: number = this.vertexLabel !== null ? 1 : 0;
+   670→        // priority: if we have a per-face priority array, emit 255; otherwise
+   671→        // emit the shared priority byte.
+   672→        const priorityByte: number = this.trianglePriority !== null ? 255 : this.priority;
+   673→
+   674→        // ---- 377 body section sizes (in decode order) ----
+   675→        //   1. vertex flags         (vc)
+   676→        //   2. faceOrientations     (tc)              -- the type bytes
+   677→        //   3. facePriorities       (tc, if priority==255)
+   678→        //   4. faceLabels           (tc, if hasFaceLabels)
+   679→        //   5. faceInfos            (tc, if hasInfo)
+   680→        //   6. vertexLabels         (vc, if hasVertexLabels)
+   681→        //   7. faceAlphas           (tc, if hasAlpha)
+   682→        //   8. faceVertices         (dataLenFaceOrientations)
+   683→        //   9. faceColours          (tc * 2)
+   684→        //  10. faceTextureAxis      (tfc * 6)         -- the UV vertex indices
+   685→        //  11. vertexX              (dataLenX)
+   686→        //  12. vertexY              (dataLenY)
+   687→        //  13. vertexZ              (dataLenZ)
+   688→        const bodySize: number =
+   689→            vc +
+   690→            tc +
+   691→            (priorityByte === 255 ? tc : 0) +
+   692→            (hasFaceLabels === 1 ? tc : 0) +
+   693→            (hasInfo === 1 ? tc : 0) +
+   694→            (hasVertexLabels === 1 ? vc : 0) +
+   695→            (hasAlpha === 1 ? tc : 0) +
+   696→            dataLenFaceOrientations +
+   697→            tc * 2 +
+   698→            tfc * 6 +
+   699→            dataLenX +
+   700→            dataLenY +
+   701→            dataLenZ;
+   702→
+   703→        const out: Packet = new Packet(new Uint8Array(bodySize + 18));
+   704→
+   705→        // 1. vertex flags
+   706→        out.data.set(flagBytes, out.pos);
+   707→        out.pos += vc;
+   708→
+   709→        // 2. face orientations (type bytes)
+   710→        out.data.set(oriBytes, out.pos);
+   711→        out.pos += tc;
+   712→
+   713→        // 3. face priorities (per-face array)
+   714→        if (priorityByte === 255 && this.trianglePriority !== null) {
+   715→            for (let t: number = 0; t < tc; t++) {
+   716→                out.p1(this.trianglePriority[t]);
+   717→            }
+   718→        }
+   719→
+   720→        // 4. face labels (triangle tags)
+   721→        if (hasFaceLabels === 1 && this.triangleTag !== null) {
+   722→            for (let t: number = 0; t < tc; t++) {
+   723→                out.p1(this.triangleTag[t]);
+   724→            }
+   725→        }
+   726→
+   727→        // 5. face infos
+   728→        if (hasInfo === 1 && this.triangleInfo !== null) {
+   729→            for (let t: number = 0; t < tc; t++) {
+   730→                out.p1(this.triangleInfo[t]);
+   731→            }
+   732→        }
+   733→
+   734→        // 6. vertex labels
+   735→        if (hasVertexLabels === 1 && this.vertexLabel !== null) {
+   736→            for (let v: number = 0; v < vc; v++) {
+   737→                out.p1(this.vertexLabel[v]);
+   738→            }
+   739→        }
+   740→
+   741→        // 7. face alphas
+   742→        if (hasAlpha === 1 && this.triangleAlpha !== null) {
+   743→            for (let t: number = 0; t < tc; t++) {
+   744→                out.p1(this.triangleAlpha[t]);
+   745→            }
+   746→        }
+   747→
+   748→        // 8. face vertices (smart-encoded index deltas)
+   749→        for (let i: number = 0; i < idxBytes.length; i++) {
+   750→            out.p1(idxBytes[i]);
+   751→        }
+   752→
+   753→        // 9. face colours (u16 each — low 15 bits)
+   754→        for (let t: number = 0; t < tc; t++) {
+   755→            out.p2(this.triangleColour[t]);
+   756→        }
+   757→
+   758→        // 10. face texture axis (texturedVertexA/B/C as u16 each)
+   759→        if (tfc > 0 && this.texturedVertexA !== null) {
+   760→            for (let t: number = 0; t < tfc; t++) {
+   761→                out.p2(this.texturedVertexA[t]);
+   762→                out.p2(this.texturedVertexB[t]);
+   763→                out.p2(this.texturedVertexC[t]);
+   764→            }
+   765→        }
+   766→
+   767→        // 11. vertex X
+   768→        for (let i: number = 0; i < xBytes.length; i++) {
+   769→            out.p1(xBytes[i]);
+   770→        }
+   771→
+   772→        // 12. vertex Y
+   773→        for (let i: number = 0; i < yBytes.length; i++) {
+   774→            out.p1(yBytes[i]);
+   775→        }
+   776→
+   777→        // 13. vertex Z
+   778→        for (let i: number = 0; i < zBytes.length; i++) {
+   779→            out.p1(zBytes[i]);
+   780→        }
+   781→
+   782→        // ---- 18-byte 377 trailer ----
+   783→        out.p2(vc); // vertexCount
+   784→        out.p2(tc); // faceCount
+   785→        out.p1(tfc); // texturedFaceCount
+   786→        out.p1(hasInfo); // hasInfo
+   787→        out.p1(priorityByte); // priority
+   788→        out.p1(hasAlpha); // hasAlpha
+   789→        out.p1(hasFaceLabels); // hasFaceLabels
+   790→        out.p1(hasVertexLabels); // hasVertexLabels
+   791→        out.p2(dataLenX); // dataLengthX
+   792→        out.p2(dataLenY); // dataLengthY
+   793→        out.p2(dataLenZ); // dataLengthZ
+   794→        out.p2(dataLenFaceOrientations); // dataLengthFaceOrientations
+   795→
+   796→        return out.data;
+   797→    }
+   798→}
+   799→
+   800→/**
+   801→ * Append a signed smart-encoded value to a byte buffer.
+   802→ *
+   803→ * Matches the format read by `Packet.gsmart()`:
+   804→ *   - value in [-64, 63]      -> 1 byte  = value + 0x40
+   805→ *   - value in [-16384, 16383]-> 2 bytes = value + 0xc000 (big-endian)
+   806→ *
+   807→ * LostCity's `Packet.psmart()` only handles non-negative values, hence the
+   808→ * local helper. We push raw bytes into a plain array because the encoder
+   809→ * needs to know the byte length BEFORE allocating the output buffer.
+   810→ */
+   811→function psmartSigned(out: number[], value: number): void {
+   812→    if (value >= -64 && value <= 63) {
+   813→        out.push((value + 0x40) & 0xff);
+   814→    } else if (value >= -16384 && value <= 16383) {
+   815→        const v: number = (value + 0xc000) & 0xffff;
+   816→        out.push((v >> 8) & 0xff);
+   817→        out.push(v & 0xff);
+   818→    } else {
+   819→        throw new Error(`psmartSigned: value ${value} out of smart range [-16384, 16383]`);
+   820→    }
+   821→}
+   822→

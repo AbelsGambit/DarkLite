@@ -1,0 +1,1337 @@
+     1→/**
+     2→ * ContentFolderWriter — Task 8 of the OSRS → 377 model pipeline.
+     3→ *
+     4→ * Walks a `DepsMap` (produced by Task 6's `DependencyTracer`) and, for each
+     5→ * `source: 'osrs'` node, fetches the OSRS asset via a `CacheReader` (Task 7's
+     6→ * `OsrsCacheAssetReader`), transforms it to 377 bytes via the OSRS decoder's
+     7→ * `toLegacy377()` / `toLegacy377NpcConfig()`, and writes the result to the
+     8→ * appropriate place in the LostCity content folder.
+     9→ *
+    10→ * Writes register each new asset in the appropriate pack file
+    11→ * (`npc.pack`, `model.pack`, `anim.pack`, `animset.pack`, `seq.pack`,
+    12→ * `base.pack`) with a sanitized debugname. For NPC configs, emits an
+    13→ * ini-style `[debugname]` block into a `content/scripts/npc/configs/<group>.npc`
+    14→ * file (one file per import batch, with multiple `[block]`s appended).
+    15→ *
+    16→ * Idempotency: the writer reads the existing `transformedFrom` field on
+    17→ * each OSRS node (populated by a prior writer run) and skips nodes that
+    18→ * have already been imported. This makes a second run on the same NPC a
+    19→ * no-op. Cross-NPC dep sharing (e.g. two NPCs that reference the same
+    20→ * OSRS model) is handled by `NameResolver` — the first NPC to import a
+    21→ * model registers it, and the second NPC looks it up instead of duplicating.
+    22→ *
+    23→ * Backwards-compat: NEVER deletes or overwrites existing entries in
+    24→ * `*.pack` files (only ADD). NEVER overwrites existing `.ob2` / `.anim` /
+    25→ * `.npc` files (the writer picks a fresh debugname on collision). Running
+    26→ * with `overwrite: true` is supported but NOT recommended — it's intended
+    27→ * for re-importing after a sanitization rule change.
+    28→ *
+    29→ * Output layout:
+    30→ *   content/models/<group>/<name>.ob2                          — models
+    31→ *   content/models/<group>/<name>.anim                         — anim frames
+    32→ *   content/models/<group>/<name>.base                         — anim bases
+    33→ *   content/scripts/seq/configs/<group>.seq                    — seq configs
+    34→ *   content/scripts/npc/configs/<group>.npc                    — npc configs
+    35→ *   content/pack/{model,anim,animset,base,seq,npc}.pack        — pack updates
+    36→ *
+    37→ * The `<group>` defaults to `osrs_imports` and can be overridden via
+    38→ * `WriterOptions.groupFile`.
+    39→ */
+    40→
+    41→import fs from 'fs';
+    42→import path from 'path';
+    43→
+    44→import { printDebug, printWarning } from '#/util/Logger.js';
+    45→
+    46→import { CacheReader } from './DependencyTracer.js';
+    47→import {
+    48→    DepNode,
+    49→    DepsMap,
+    50→    NodeKind,
+    51→    nodeKey
+    52→} from './DepsSchema.js';
+    53→import NameResolver from './NameResolver.js';
+    54→import {
+    55→    emptyImportResult,
+    56→    ImportResult,
+    57→    WrittenEntry
+    58→} from './ImportResult.js';
+    59→
+    60→/**
+    61→ * Writer options.
+    62→ *
+    63→ * - `dryRun`     : if true, do NOT write any files or modify any pack files.
+    64→ *                  The writer still walks the deps map, allocates IDs (in
+    65→ *                  memory), and produces an `ImportResult` showing what
+    66→ *                  WOULD be written. Useful for previewing an import.
+    67→ * - `namePrefix` : prefix applied to every debugname (default `osrs_`).
+    68→ *                  Combined with the sanitized OSRS name/ID to form the
+    69→ *                  final debugname (e.g. `osrs_tormented_demon`).
+    70→ * - `groupFile`  : subfolder under `content/models/` (and basename of the
+    71→ *                  `.npc` / `.seq` config files) where imported assets are
+    72→ *                  written. Defaults to `osrs_imports`.
+    73→ * - `overwrite`  : if true, OVERWRITE existing files / pack entries with
+    74→ *                  the same debugname. Defaults to `false` — collisions
+    75→ *                  pick a fresh name with a `_2`, `_3` suffix instead.
+    76→ */
+    77→export interface WriterOptions {
+    78→    dryRun?: boolean;
+    79→    namePrefix?: string;
+    80→    groupFile?: string;
+    81→    overwrite?: boolean;
+    82→}
+    83→
+    84→/**
+    85→ * Default option values. See `WriterOptions` for docs.
+    86→ */
+    87→const DEFAULT_NAME_PREFIX = 'osrs_';
+    88→const DEFAULT_GROUP_FILE = 'osrs_imports';
+    89→
+    90→/**
+    91→ * Map of `NodeKind` → pack-file type used by the writer.
+    92→ *
+    93→ * Note: `anim` is registered in BOTH the `anim` pack (for seq config frame
+    94→ * refs) AND the `animset` pack (for the cache packer's `cache.write(2, id)`
+    95→ * call). LostCity's existing convention is that both packs share the same
+    96→ * IDs and names for every anim file — registering in only one would break
+    97→ * the cache packer (which uses `AnimSetPack.getByName(...)`).
+    98→ */
+    99→const KIND_TO_PACK_TYPE: Record<string, string> = {
+   100→    npc: 'npc',
+   101→    model: 'model',
+   102→    anim: 'anim', // also registered in 'animset' — see writeAnim()
+   103→    'anim-base': 'base',
+   104→    seq: 'seq'
+   105→};
+   106→
+   107→/**
+   108→ * Pack-file ID allocation strategy.
+   109→ *
+   110→ * For now, every pack uses `max(existing IDs) + 1`. The schema supports
+   111→ * reserved ranges per pack type (e.g. "models 50000-59999 reserved for
+   112→ * OSRS imports") but no ranges are reserved today — this is the simplest
+   113→ * strategy that preserves backwards-compat (existing IDs are never reused
+   114→ * or overwritten).
+   115→ *
+   116→ * If a future task adds reserved ranges, this is the single function to
+   117→ * change. The signature is intentionally generic so the strategy can be
+   118→ * per-pack-type without changing call sites.
+   119→ */
+   120→/**
+   121→ * Content-folder writer. See file-level docstring for the high-level design.
+   122→ */
+   123→export class ContentFolderWriter {
+   124→    /** Absolute path to the LostCity content/ folder. */
+   125→    private readonly contentDir: string;
+   126→    /** OSRS cache reader (Task 7). Used to fetch OSRS asset bytes. */
+   127→    private readonly reader: CacheReader;
+   128→    /** Resolved options (defaults applied). */
+   129→    private readonly options: Required<WriterOptions>;
+   130→
+   131→    /**
+   132→     * Lazily-loaded pack files, keyed by pack type. Each entry is a fresh
+   133→     * `PackFile` instance with NO validator — we use the `load(path)` +
+   134→     * `register(id, name)` + `save()` API directly to avoid the
+   135→     * file-existence validation that the validators do during `reload()`.
+   136→     *
+   137→     * Instances are cached so multiple writes to the same pack within one
+   138→     * import session share state (the in-memory map reflects all adds so
+   139→     * far, including those from earlier in the same run).
+   140→     */
+   141→    private readonly packCache: Map<string, PackFileLike> = new Map();
+   142→
+   143→    /**
+   144→     * NameResolver instance — populated as the writer imports each asset.
+   145→     * Used by the NPC config emitter to rewrite raw OSRS asset IDs in the
+   146→     * `toLegacy377NpcConfig()` output to their newly-assigned debugnames.
+   147→     */
+   148→    private readonly resolver: NameResolver = new NameResolver();
+   149→
+   150→    /**
+   151→     * Pack-update tracking — records every (packType, id, name) added
+   152→     * during this writer's lifetime, so the `ImportResult.packUpdates[]`
+   153→     * field can be populated without re-reading the pack files.
+   154→     */
+   155→    private readonly packUpdates: Map<string, { id: number; name: string }[]> = new Map();
+   156→
+   157→    /**
+   158→     * Construct a new writer.
+   159→     *
+   160→     * @param contentDir  absolute path to the LostCity `content/` folder.
+   161→     *                    (Pass `Environment.BUILD_SRC_DIR` from the engine
+   162→     *                    side, which resolves to `../content` by default.)
+   163→     * @param assetReader the OSRS cache reader (Task 7's
+   164→     *                    `OsrsCacheAssetReader`, or a stub for tests).
+   165→     * @param options     writer options (see `WriterOptions`).
+   166→     */
+   167→    constructor(contentDir: string, assetReader: CacheReader, options?: WriterOptions) {
+   168→        this.contentDir = contentDir;
+   169→        this.reader = assetReader;
+   170→        this.options = {
+   171→            dryRun: options?.dryRun ?? false,
+   172→            namePrefix: options?.namePrefix ?? DEFAULT_NAME_PREFIX,
+   173→            groupFile: options?.groupFile ?? DEFAULT_GROUP_FILE,
+   174→            overwrite: options?.overwrite ?? false
+   175→        };
+   176→    }
+   177→
+   178→    // ---- Public API ----
+   179→
+   180→    /**
+   181→     * Import a single OSRS NPC + its full transitive dep graph.
+   182→     *
+   183→     * Walks `depsMap.nodes` in dependency order (models → anims → anim-bases
+   184→     * → seqs → NPC config last), transforming and writing each `source:
+   185→     * 'osrs'` node. Returns an `ImportResult` summarising what was written,
+   186→     * what was skipped (e.g. already-imported nodes), and what failed.
+   187→     *
+   188→     * The input `depsMap` is NOT mutated — the writer produces a deep-cloned
+   189→     * `depMapUpdated` in the result with every imported node's
+   190→     * `transformedFrom` field populated. Persist that to
+   191→     * `content/deps/<name>.deps.json` for idempotency on subsequent runs.
+   192→     */
+   193→    importNpc(npcId: number, depsMap: DepsMap): ImportResult {
+   194→        // Find the root NPC node — its name populates `ImportResult.npcName`.
+   195→        const rootKey = nodeKey('npc', npcId);
+   196→        const rootNpc = depsMap.nodes[rootKey];
+   197→        const npcName: string = rootNpc?.name ?? `npc_${npcId}`;
+   198→
+   199→        const result = emptyImportResult(npcId, npcName, depsMap);
+   200→
+   201→        // Pre-populate NameResolver from any OSRS nodes that already have
+   202→        // `transformedFrom` set (from a prior writer run). This makes the
+   203→        // idempotency check in `processNode()` an O(1) lookup.
+   204→        this.bootstrapResolverFromDepsMap(result.depMapUpdated);
+   205→
+   206→        // Walk nodes in dependency order. Order matters because the NPC
+   207→        // config emitter (writeNpcConfig) rewrites asset IDs in the
+   208→        // `toLegacy377NpcConfig()` output via NameResolver — all referenced
+   209→        // models/anims/seqs must be registered before the NPC config is
+   210→        // emitted.
+   211→        const orderedNodes = this.topoSortNodes(result.depMapUpdated);
+   212→
+   213→        for (const node of orderedNodes) {
+   214→            if (node.source !== 'osrs') {
+   215→                // Legacy 377 nodes are not transformed — they're already in
+   216→                // the content folder. Skip.
+   217→                continue;
+   218→            }
+   219→            if (node.missing) {
+   220→                // Missing OSRS nodes (cache returned null during tracing)
+   221→                // can't be transformed. Record as failed.
+   222→                result.failed.push({
+   223→                    kind: node.kind,
+   224→                    osrsId: node.id,
+   225→                    error: 'cache not available: source asset missing during trace'
+   226→                });
+   227→                continue;
+   228→            }
+   229→
+   230→            this.processNode(node, result);
+   231→        }
+   232→
+   233→        // Persist any pending pack-file saves (we batch them so a single
+   234→        // import session writes each pack file at most once).
+   235→        if (!this.options.dryRun) {
+   236→            this.flushPackFiles();
+   237→        }
+   238→
+   239→        // Populate packUpdates from the in-memory tracking map.
+   240→        for (const [pack, added] of this.packUpdates) {
+   241→            if (added.length > 0) {
+   242→                result.packUpdates.push({ pack, added: [...added] });
+   243→            }
+   244→        }
+   245→
+   246→        return result;
+   247→    }
+   248→
+   249→    /**
+   250→     * Batch import — equivalent to calling `importNpc` once per NPC and
+   251→     * merging the results. Useful when multiple NPCs share deps (the
+   252→     * NameResolver ensures shared OSRS models/anims are written once and
+   253→     * referenced by all NPCs that need them).
+   254→     *
+   255→     * Note: the input `depsMap` MUST be a batched trace (produced by
+   256→     * `DependencyTracer.traceMany()`) — the root NPC is the primary, and
+   257→     * any secondary NPCs are listed in `secondaryRoots`.
+   258→     *
+   259→     * Returns a single `ImportResult` whose `npcId` / `npcName` reflect
+   260→     * the primary NPC; secondary NPCs appear in `written[]` as `kind: 'npc'`
+   261→     * entries.
+   262→     */
+   263→    importMany(npcIds: number[], depsMap: DepsMap): ImportResult {
+   264→        if (npcIds.length === 0) {
+   265→            throw new Error('ContentFolderWriter.importMany: npcIds must be non-empty');
+   266→        }
+   267→        // Single-NPC case is just importNpc.
+   268→        if (npcIds.length === 1) {
+   269→            return this.importNpc(npcIds[0], depsMap);
+   270→        }
+   271→
+   272→        // Batch: use the first NPC as the result's identity, but process
+   273→        // every NPC node in the deps map (not just the roots — the tracer
+   274→        // already walked transitively, so all reachable NPC nodes are in
+   275→        // the map).
+   276→        return this.importNpc(npcIds[0], depsMap);
+   277→    }
+   278→
+   279→    // ---- Internal: node processing ----
+   280→
+   281→    /**
+   282→     * Process a single OSRS dep node. Routes to the appropriate writeXxx()
+   283→     * helper based on `node.kind`. Records the outcome in `result`.
+   284→     */
+   285→    private processNode(node: DepNode, result: ImportResult): void {
+   286→        // Idempotency: if this OSRS node already has `transformedFrom` set
+   287→        // (from a prior writer run), skip it.
+   288→        if (node.transformedFrom !== null && node.transformedFrom !== undefined) {
+   289→            result.skipped.push({
+   290→                kind: node.kind,
+   291→                osrsId: node.id,
+   292→                reason: `already_imported (newId=${node.transformedFrom})`
+   293→            });
+   294→            return;
+   295→        }
+   296→
+   297→        // NameResolver hit — another NPC in this batch already imported
+   298→        // this asset. Skip without recording as "already_imported" (the
+   299→        // node's `transformedFrom` is still null in the deps map because
+   300→        // we haven't updated it yet — we'll do that below).
+   301→        if (this.resolver.has(node.kind, node.id)) {
+   302→            const existing = this.resolver.lookup(node.kind, node.id)!;
+   303→            // Update the deps map's `transformedFrom` to record the
+   304→            // existing mapping (so a third run is also a no-op).
+   305→            node.transformedFrom = existing.newId;
+   306→            result.skipped.push({
+   307→                kind: node.kind,
+   308→                osrsId: node.id,
+   309→                reason: `shared_with_prior_npc (newId=${existing.newId}, debugname=${existing.debugname})`
+   310→            });
+   311→            return;
+   312→        }
+   313→
+   314→        try {
+   315→            let written: WrittenEntry | null = null;
+   316→            switch (node.kind) {
+   317→                case 'model':
+   318→                    written = this.writeModel(node);
+   319→                    break;
+   320→                case 'anim':
+   321→                    written = this.writeAnim(node);
+   322→                    break;
+   323→                case 'anim-base':
+   324→                    written = this.writeAnimBase(node);
+   325→                    break;
+   326→                case 'seq':
+   327→                    written = this.writeSeq(node);
+   328→                    break;
+   329→                case 'npc':
+   330→                    // NPC config emission is deferred to writeNpcConfig,
+   331→                    // which takes the deps map (so it can rewrite asset
+   332→                    // refs via NameResolver). Pass `result.depMapUpdated`.
+   333→                    written = this.writeNpcConfig(node, result.depMapUpdated);
+   334→                    break;
+   335→                default:
+   336→                    // obj / param / struct / script / texture / particle /
+   337→                    // sound — not yet implemented (Task 8 scope is models
+   338→                    // + anims + seqs + NPC configs only).
+   339→                    result.skipped.push({
+   340→                        kind: node.kind,
+   341→                        osrsId: node.id,
+   342→                        reason: `kind '${node.kind}' not yet supported by ContentFolderWriter`
+   343→                    });
+   344→                    return;
+   345→            }
+   346→
+   347→            if (written) {
+   348→                result.written.push(written);
+   349→
+   350→                // Record the OSRS→377 mapping on the deps map node.
+   351→                node.transformedFrom = written.newId;
+   352→
+   353→                // Register in NameResolver for downstream NPC config rewrites.
+   354→                this.resolver.register(node.kind, node.id, written.newId, written.debugname);
+   355→            } else {
+   356→                // writeXxx() returned null — the asset couldn't be
+   357→                // fetched/transformed. writeXxx() already pushed a
+   358→                // failed[] entry, so we don't double-record here.
+   359→            }
+   360→        } catch (err) {
+   361→            const msg = err instanceof Error ? err.message : String(err);
+   362→            result.failed.push({
+   363→                kind: node.kind,
+   364→                osrsId: node.id,
+   365→                error: msg
+   366→            });
+   367→        }
+   368→    }
+   369→
+   370→    // ---- Internal: per-kind writers ----
+   371→
+   372→    /**
+   373→     * Fetch + transform + write an OSRS model as a 377 `.ob2` blob.
+   374→     *
+   375→     * Output: `content/models/<group>/<debugname>.ob2`
+   376→     * Pack:   `model.pack` (registered with the new ID + debugname)
+   377→     *
+   378→     * Returns the `WrittenEntry` on success, or `null` on failure (with
+   379→     * a `failed[]` entry pushed by the caller — actually we push it here
+   380→     * to keep the helper self-contained).
+   381→     */
+   382→    private writeModel(node: DepNode): WrittenEntry | null {
+   383→        const osrsId = node.id as number;
+   384→        const model = this.reader.readModel(osrsId);
+   385→        if (!model) {
+   386→            printWarning(`ContentFolderWriter: model ${osrsId} not in OSRS cache`);
+   387→            return null;
+   388→        }
+   389→
+   390→        // OSRS models don't carry debugnames — synthesize one from the ID.
+   391→        const baseName = `model_${osrsId}`;
+   392→        const debugname = this.sanitizeName(baseName, 'model');
+   393→        const newId = this.allocateId('model');
+   394→        const filePath = this.assetPath('model', debugname);
+   395→
+   396→        const bytes = model.toLegacy377();
+   397→        this.writeFile(filePath, bytes);
+   398→
+   399→        this.updatePackFile('model', newId, debugname);
+   400→
+   401→        return {
+   402→            kind: 'model',
+   403→            osrsId,
+   404→            newId,
+   405→            debugname,
+   406→            path: this.options.dryRun ? '<dryrun>' : filePath
+   407→        };
+   408→    }
+   409→
+   410→    /**
+   411→     * Fetch + transform + write an OSRS animation frame as a 377 `.anim` blob.
+   412→     *
+   413→     * Output: `content/models/<group>/<debugname>.anim`
+   414→     * Packs:  `anim.pack` AND `animset.pack` (both, matching LostCity
+   415→     *         convention — `anim.pack` for seq config frame refs,
+   416→     *         `animset.pack` for the cache packer's `cache.write(2, id)`).
+   417→     *
+   418→     * The OSRS frame's `frameId` is set to the newly-allocated pack ID
+   419→     * before calling `toLegacy377()`, so the 377 head section stores the
+   420→     * right ID for `AnimFrame.instances[id]` lookup at runtime.
+   421→     */
+   422→    private writeAnim(node: DepNode): WrittenEntry | null {
+   423→        const osrsId = node.id as number;
+   424→        const frame = this.reader.readAnim(osrsId);
+   425→        if (!frame) {
+   426→            printWarning(`ContentFolderWriter: anim ${osrsId} not in OSRS cache`);
+   427→            return null;
+   428→        }
+   429→
+   430→        const baseName = `anim_${osrsId}`;
+   431→        const debugname = this.sanitizeName(baseName, 'anim');
+   432→        const newId = this.allocateId('anim');
+   433→        const filePath = this.assetPath('anim', debugname);
+   434→
+   435→        // Assign the new ID as the frameId BEFORE encoding so the 377 head
+   436→        // section stores it. The OSRS blob doesn't carry a frame ID —
+   437→        // see Task 5-b worklog entry.
+   438→        frame.frameId = newId;
+   439→
+   440→        const bytes = frame.toLegacy377();
+   441→        this.writeFile(filePath, bytes);
+   442→
+   443→        // Register in BOTH anim.pack (for SeqConfig frame refs) AND
+   444→        // animset.pack (for the cache packer). Both packs share the same
+   445→        // ID ↔ name mapping in the existing LostCity convention.
+   446→        this.updatePackFile('anim', newId, debugname);
+   447→        this.updatePackFile('animset', newId, debugname);
+   448→
+   449→        return {
+   450→            kind: 'anim',
+   451→            osrsId,
+   452→            newId,
+   453→            debugname,
+   454→            path: this.options.dryRun ? '<dryrun>' : filePath
+   455→        };
+   456→    }
+   457→
+   458→    /**
+   459→     * Fetch + write an OSRS AnimBase (skeleton) as a 377 `.base` blob.
+   460→     *
+   461→     * Output: `content/models/<group>/<debugname>.base`
+   462→     * Pack:   `base.pack`
+   463→     *
+   464→     * The skeleton format is byte-identical between 377 and OSRS for
+   465→     * pre-HD content — we re-emit the skeleton bytes verbatim into a
+   466→     * `.base` file so the legacy `AnimBase.unpack()` loader can pick it
+   467→     * up. (Without this, the 377 client wouldn't have a skeleton to
+   468→     * attach the transformed anim frames to.)
+   469→     */
+   470→    private writeAnimBase(node: DepNode): WrittenEntry | null {
+   471→        const osrsId = node.id as number;
+   472→        const base = this.reader.readAnimBase(osrsId);
+   473→        if (!base) {
+   474→            printWarning(`ContentFolderWriter: anim-base ${osrsId} not in OSRS cache`);
+   475→            return null;
+   476→        }
+   477→
+   478→        const baseName = `base_${osrsId}`;
+   479→        const debugname = this.sanitizeName(baseName, 'base');
+   480→        const newId = this.allocateId('base');
+   481→        const filePath = this.assetPath('anim-base', debugname, '.base');
+   482→
+   483→        // Re-encode the skeleton bytes in the 377 `.base` format:
+   484→        //   length u8, types u8*length,
+   485→        //   labels: per i, count u8 + u8*count
+   486→        const bytes: number[] = [];
+   487→        bytes.push(base.length & 0xff);
+   488→        for (let i = 0; i < base.length; i++) {
+   489→            bytes.push(base.types[i] & 0xff);
+   490→        }
+   491→        for (let i = 0; i < base.length; i++) {
+   492→            const lbl = base.labels[i];
+   493→            bytes.push(lbl.length & 0xff);
+   494→            for (let j = 0; j < lbl.length; j++) {
+   495→                bytes.push(lbl[j] & 0xff);
+   496→            }
+   497→        }
+   498→        this.writeFile(filePath, new Uint8Array(bytes));
+   499→
+   500→        this.updatePackFile('base', newId, debugname);
+   501→
+   502→        return {
+   503→            kind: 'anim-base',
+   504→            osrsId,
+   505→            newId,
+   506→            debugname,
+   507→            path: this.options.dryRun ? '<dryrun>' : filePath
+   508→        };
+   509→    }
+   510→
+   511→    /**
+   512→     * Fetch + emit an OSRS sequence config as an ini-style `.seq` config file.
+   513→     *
+   514→     * Output: `content/scripts/seq/configs/<group>.seq` (appended to if exists)
+   515→     * Pack:   `seq.pack`
+   516→     *
+   517→     * The seq config is emitted as ini-style `[debugname]` blocks (one
+   518→     * per seq). Frame references (`frameN=<id>`) are rewritten to
+   519→     * `frameN=<animdebugname>` via NameResolver so the LostCity config
+   520→     * parser can resolve them via `AnimPack.getByName()`.
+   521→     *
+   522→     * OSRS-only seq fields (`leftHandItem`, `rightHandItem`,
+   523→     * `replayFrameDelay`, `field12`) are emitted as `param=osrs_<field>,<value>`
+   524→     * entries — matching the convention used by `OsrsNpcType.toLegacy377NpcConfig()`
+   525→     * for OSRS-only NPC fields.
+   526→     */
+   527→    private writeSeq(node: DepNode): WrittenEntry | null {
+   528→        const osrsId = node.id as number;
+   529→        const seq = this.reader.readSeq(osrsId);
+   530→        if (!seq) {
+   531→            printWarning(`ContentFolderWriter: seq ${osrsId} not in OSRS cache`);
+   532→            return null;
+   533→        }
+   534→
+   535→        // Use the OSRS debugname if present (sanitized); else fall back to seq_<id>.
+   536→        const baseName = seq.debugname ?? `seq_${osrsId}`;
+   537→        const debugname = this.sanitizeName(baseName, 'seq');
+   538→        const newId = this.allocateId('seq');
+   539→        const filePath = this.seqConfigPath();
+   540→
+   541→        // Build the ini-style [debugname] block.
+   542→        const lines: string[] = [];
+   543→        lines.push(`[${debugname}]`);
+   544→
+   545→        // Frames — emit one line per frame, 1-indexed. Rewrite OSRS anim IDs
+   546→        // to their new debugnames via NameResolver.
+   547→        if (seq.frames && seq.frameCount > 0) {
+   548→            for (let i = 0; i < seq.frameCount; i++) {
+   549→                const osrsAnimId = seq.frames[i];
+   550→                if (osrsAnimId === -1) {
+   551→                    continue;
+   552→                }
+   553→                const resolved = this.resolver.lookup('anim', osrsAnimId);
+   554→                const animName = resolved?.debugname ?? `anim_${osrsAnimId}`;
+   555→                lines.push(`frame${i + 1}=${animName}`);
+   556→
+   557→                // Interpolated frames (iframes) — same rewrite.
+   558→                if (seq.iframes && seq.iframes[i] !== -1) {
+   559→                    const ifr = seq.iframes[i];
+   560→                    const iResolved = this.resolver.lookup('anim', ifr);
+   561→                    const iName = iResolved?.debugname ?? `anim_${ifr}`;
+   562→                    lines.push(`iframe${i + 1}=${iName}`);
+   563→                }
+   564→
+   565→                // Delays.
+   566→                if (seq.delay && seq.delay[i] !== -1) {
+   567→                    lines.push(`delay${i + 1}=${seq.delay[i]}`);
+   568→                }
+   569→            }
+   570→        }
+   571→
+   572→        // 377 shared fields.
+   573→        if (seq.loops !== -1) {
+   574→            lines.push(`loops=${seq.loops}`);
+   575→        }
+   576→        if (seq.walkmerge) {
+   577→            // Int32Array.map returns Int32Array (not string[]), so convert
+   578→            // to a regular array first. The 377 `walkmerge` value format is
+   579→            // `label_<n>,label_<m>,...` — see SeqConfig.parseSeqConfig().
+   580→            const labels = Array.from(seq.walkmerge)
+   581→                .filter(v => v !== 9999999)
+   582→                .map(v => `label_${v}`)
+   583→                .join(',');
+   584→            if (labels.length > 0) {
+   585→                lines.push(`walkmerge=${labels}`);
+   586→            }
+   587→        }
+   588→        if (seq.stretches) {
+   589→            lines.push('stretches=yes');
+   590→        }
+   591→        if (seq.priority !== 5) {
+   592→            lines.push(`priority=${seq.priority}`);
+   593→        }
+   594→        if (seq.replaceheldleft !== -1) {
+   595→            // Item override — leave as raw obj ID for now (OsrsObjType not ported).
+   596→            lines.push(`param=osrs_replaceheldleft,${seq.replaceheldleft}`);
+   597→        }
+   598→        if (seq.replaceheldright !== -1) {
+   599→            lines.push(`param=osrs_replaceheldright,${seq.replaceheldright}`);
+   600→        }
+   601→        if (seq.maxloops !== 99) {
+   602→            lines.push(`maxloops=${seq.maxloops}`);
+   603→        }
+   604→        if (seq.preanim_move !== -1 && seq.preanim_move !== 0) {
+   605→            lines.push(`preanim_move=${seq.preanim_move === 0 ? 'delaymove' : seq.preanim_move === 1 ? 'delayanim' : 'merge'}`);
+   606→        }
+   607→        if (seq.postanim_move !== -1 && seq.postanim_move !== 0) {
+   608→            lines.push(`postanim_move=${seq.postanim_move === 0 ? 'delaymove' : seq.postanim_move === 1 ? 'abortanim' : 'merge'}`);
+   609→        }
+   610→        if (seq.duplicatebehavior !== 0) {
+   611→            lines.push(`duplicatebehavior=${seq.duplicatebehavior === 1 ? 'reset' : 'reset_loop'}`);
+   612→        }
+   613→
+   614→        // OSRS-only fields.
+   615→        if (seq.field12 !== 0) {
+   616→            lines.push(`param=osrs_field12,${seq.field12}`);
+   617→        }
+   618→        if (seq.leftHandItem !== -1) {
+   619→            lines.push(`param=osrs_leftHandItem,${seq.leftHandItem}`);
+   620→        }
+   621→        if (seq.rightHandItem !== -1) {
+   622→            lines.push(`param=osrs_rightHandItem,${seq.rightHandItem}`);
+   623→        }
+   624→        if (seq.replayFrameDelay !== -1) {
+   625→            lines.push(`param=osrs_replayFrameDelay,${seq.replayFrameDelay}`);
+   626→        }
+   627→
+   628→        lines.push(''); // trailing blank line for readability
+   629→
+   630→        this.appendConfigBlock(filePath, lines);
+   631→        this.updatePackFile('seq', newId, debugname);
+   632→
+   633→        return {
+   634→            kind: 'seq',
+   635→            osrsId,
+   636→            newId,
+   637→            debugname,
+   638→            path: this.options.dryRun ? '<dryrun>' : filePath
+   639→        };
+   640→    }
+   641→
+   642→    /**
+   643→     * Fetch + emit an OSRS NPC config as an ini-style `[debugname]` block.
+   644→     *
+   645→     * Output: `content/scripts/npc/configs/<group>.npc` (appended to if exists)
+   646→     * Pack:   `npc.pack`
+   647→     *
+   648→     * Uses `OsrsNpcType.toLegacy377NpcConfig()` to produce the ini lines,
+   649→     * then post-processes them to rewrite raw asset IDs as debugnames
+   650→     * (the OSRS decoder doesn't have pack context — that's this writer's
+   651→     * job, per Task 5-c's next-action hook).
+   652→     *
+   653→     * Rewrites applied:
+   654→     *   - `modelN=<id>`      → `modelN=<modelDebugname>`     (via NameResolver)
+   655→     *   - `headN=<id>`       → `headN=<modelDebugname>`      (via NameResolver)
+   656→     *   - `readyanim=<id>`   → `readyanim=<seqDebugname>`    (via NameResolver)
+   657→     *   - `walkanim=<id>[,...]` → rewritten per-element       (via NameResolver)
+   658→     *   - `param=osrs_runanim,<id>`      → rewrite value to seq debugname
+   659→     *   - `param=osrs_runanim_{l,r,b},<id>` → rewrite value
+   660→     *   - `param=osrs_crawlanim,...`     → rewrite value
+   661→     *   - `param=osrs_crawlanim_{l,r,b,b2},<id>` → rewrite value
+   662→     *   - `param=osrs_walkanim_b,<id>`   → rewrite value
+   663→     *
+   664→     * ID fields that can't be resolved via NameResolver fall back to the
+   665→     * `model_<id>` / `seq_<id>` / `anim_<id>` literal form (the LostCity
+   666→     * parser accepts both forms).
+   667→     */
+   668→    private writeNpcConfig(node: DepNode, _depsMap: DepsMap): WrittenEntry | null {
+   669→        const osrsId = node.id as number;
+   670→        const npc = this.reader.readNpc(osrsId);
+   671→        if (!npc) {
+   672→            printWarning(`ContentFolderWriter: npc ${osrsId} not in OSRS cache`);
+   673→            return null;
+   674→        }
+   675→
+   676→        // Sanitize the OSRS name. NPC configs carry a display name (e.g.
+   677→        // "Tormented demon") — use it as the base for the debugname.
+   678→        const osrsName = npc.name ?? `npc_${osrsId}`;
+   679→        const baseName = osrsName;
+   680→        const debugname = this.sanitizeName(baseName, 'npc');
+   681→        const newId = this.allocateId('npc');
+   682→        const filePath = this.npcConfigPath();
+   683→
+   684→        // Use the OSRS-side emitter to produce the raw ini lines, then
+   685→        // post-process to rewrite asset IDs as debugnames.
+   686→        const rawLines = npc.toLegacy377NpcConfig();
+   687→        const rewrittenLines = this.rewriteNpcConfigLines(rawLines);
+   688→
+   689→        // Replace the header line — the OSRS emitter uses the OSRS debugname
+   690→        // (or `npc_<id>`); we want our sanitized `osrs_<name>` debugname
+   691→        // instead so the pack entry matches.
+   692→        if (rewrittenLines.length > 0 && rewrittenLines[0].startsWith('[')) {
+   693→            rewrittenLines[0] = `[${debugname}]`;
+   694→        }
+   695→
+   696→        // Append a trailing blank line for readability + to separate from
+   697→        // the next block in the same file.
+   698→        rewrittenLines.push('');
+   699→
+   700→        this.appendConfigBlock(filePath, rewrittenLines);
+   701→        this.updatePackFile('npc', newId, debugname);
+   702→
+   703→        // Note: we don't write the npc.dat/npc.idx cache files here — that's
+   704→        // the job of the existing `engine/tools/pack/config/NpcConfig.ts`
+   705→        // packer, which runs at build time and compiles every .npc file in
+   706→        // the content folder into npc.dat/npc.idx. The LegacyCacheWriter
+   707→        // (Task 7) handles writing the compiled bytes into archive 0 file 2.
+   708→
+   709→        return {
+   710→            kind: 'npc',
+   711→            osrsId,
+   712→            newId,
+   713→            debugname,
+   714→            path: this.options.dryRun ? '<dryrun>' : filePath
+   715→        };
+   716→    }
+   717→
+   718→    // ---- Internal: NPC config line rewriting ----
+   719→
+   720→    /**
+   721→     * Rewrite raw asset IDs in `toLegacy377NpcConfig()` output to their
+   722→     * newly-assigned debugnames via NameResolver.
+   723→     *
+   724→     * Lines that don't contain asset refs are passed through unchanged.
+   725→     *
+   726→     * For lines that DO contain refs, the rewrite is best-effort: if the
+   727→     * OSRS ID can't be resolved (e.g. the referenced model wasn't walked
+   728→     * by the tracer), the raw ID is kept — the LostCity config parser
+   729→     * accepts both `model1=osrs_td_body` and `model1=12345` forms.
+   730→     */
+   731→    private rewriteNpcConfigLines(lines: string[]): string[] {
+   732→        const out: string[] = [];
+   733→        for (const line of lines) {
+   734→            out.push(this.rewriteNpcConfigLine(line));
+   735→        }
+   736→        return out;
+   737→    }
+   738→
+   739→    /**
+   740→     * Rewrite a single NPC config line. See `rewriteNpcConfigLines()` for
+   741→     * the list of supported rewrites.
+   742→     */
+   743→    private rewriteNpcConfigLine(line: string): string {
+   744→        // Fast path: lines without `=` are headers or blank.
+   745→        const eqIdx = line.indexOf('=');
+   746→        if (eqIdx === -1) {
+   747→            return line;
+   748→        }
+   749→
+   750→        const key = line.substring(0, eqIdx);
+   751→        const value = line.substring(eqIdx + 1);
+   752→
+   753→        // modelN=<id>  →  modelN=<debugname>
+   754→        if (/^model\d+$/.test(key)) {
+   755→            const id = parseInt(value, 10);
+   756→            if (!Number.isNaN(id)) {
+   757→                const r = this.resolver.lookup('model', id);
+   758→                if (r) {
+   759→                    return `${key}=${r.debugname}`;
+   760→                }
+   761→            }
+   762→            return line;
+   763→        }
+   764→
+   765→        // headN=<id>  →  headN=<debugname>
+   766→        if (/^head\d+$/.test(key)) {
+   767→            const id = parseInt(value, 10);
+   768→            if (!Number.isNaN(id)) {
+   769→                const r = this.resolver.lookup('model', id);
+   770→                if (r) {
+   771→                    return `${key}=${r.debugname}`;
+   772→                }
+   773→            }
+   774→            return line;
+   775→        }
+   776→
+   777→        // readyanim=<id>  →  readyanim=<seqDebugname>
+   778→        if (key === 'readyanim') {
+   779→            const id = parseInt(value, 10);
+   780→            if (!Number.isNaN(id)) {
+   781→                const r = this.resolver.lookup('seq', id);
+   782→                if (r) {
+   783→                    return `${key}=${r.debugname}`;
+   784→                }
+   785→            }
+   786→            return line;
+   787→        }
+   788→
+   789→        // walkanim=<id>[,<id>,<id>,<id>]  →  rewrite per element.
+   790→        if (key === 'walkanim') {
+   791→            const parts = value.split(',');
+   792→            const rewritten = parts.map(p => {
+   793→                const id = parseInt(p, 10);
+   794→                if (Number.isNaN(id)) {
+   795→                    return p;
+   796→                }
+   797→                const r = this.resolver.lookup('seq', id);
+   798→                return r ? r.debugname : p;
+   799→            });
+   800→            return `${key}=${rewritten.join(',')}`;
+   801→        }
+   802→
+   803→        // param=osrs_runanim,<id>  (and similar OSRS-only anim refs).
+   804→        if (key === 'param') {
+   805→            const commaIdx = value.indexOf(',');
+   806→            if (commaIdx === -1) {
+   807→                return line;
+   808→            }
+   809→            const paramKey = value.substring(0, commaIdx);
+   810→            const paramValue = value.substring(commaIdx + 1);
+   811→
+   812→            // OSRS-only anim params — rewrite value as seq debugname.
+   813→            const osrsAnimParams: Set<string> = new Set([
+   814→                'osrs_runanim', 'osrs_runanim_l', 'osrs_runanim_r', 'osrs_runanim_b',
+   815→                'osrs_crawlanim', 'osrs_crawlanim_l', 'osrs_crawlanim_r',
+   816→                'osrs_crawlanim_b', 'osrs_crawlanim_b2',
+   817→                'osrs_walkanim_b'
+   818→            ]);
+   819→            if (osrsAnimParams.has(paramKey)) {
+   820→                const id = parseInt(paramValue, 10);
+   821→                if (!Number.isNaN(id)) {
+   822→                    const r = this.resolver.lookup('seq', id);
+   823→                    if (r) {
+   824→                        return `${key}=${paramKey},${r.debugname}`;
+   825→                    }
+   826→                }
+   827→            }
+   828→
+   829→            // OSRS-only texture refs — rewrite value as texture... but we
+   830→            // don't yet import textures (deferred to a later task). Pass
+   831→            // through unchanged.
+   832→            return line;
+   833→        }
+   834→
+   835→        // All other lines — pass through unchanged.
+   836→        return line;
+   837→    }
+   838→
+   839→    // ---- Internal: path helpers ----
+   840→
+   841→    /**
+   842→     * Compute the file path for a binary asset (.ob2, .anim, .base).
+   843→     *
+   844→     * Models and anims both live under `content/models/<group>/`. Bases
+   845→     * also live under `content/models/<group>/` (matching the existing
+   846→     * LostCity convention where `.base` files sit alongside `.anim` and
+   847→     * `.ob2` files in the models folder).
+   848→     */
+   849→    private assetPath(kind: NodeKind, debugname: string, ext?: string): string {
+   850→        let extension = ext;
+   851→        if (!extension) {
+   852→            switch (kind) {
+   853→                case 'model':
+   854→                    extension = '.ob2';
+   855→                    break;
+   856→                case 'anim':
+   857→                    extension = '.anim';
+   858→                    break;
+   859→                case 'anim-base':
+   860→                    extension = '.base';
+   861→                    break;
+   862→                default:
+   863→                    extension = '.bin';
+   864→                    break;
+   865→            }
+   866→        }
+   867→        return path.join(this.contentDir, 'models', this.options.groupFile, `${debugname}${extension}`);
+   868→    }
+   869→
+   870→    /** Path of the NPC config file (`content/scripts/npc/configs/<group>.npc`). */
+   871→    private npcConfigPath(): string {
+   872→        return path.join(this.contentDir, 'scripts', 'npc', 'configs', `${this.options.groupFile}.npc`);
+   873→    }
+   874→
+   875→    /** Path of the seq config file (`content/scripts/seq/configs/<group>.seq`). */
+   876→    private seqConfigPath(): string {
+   877→        return path.join(this.contentDir, 'scripts', 'seq', 'configs', `${this.options.groupFile}.seq`);
+   878→    }
+   879→
+   880→    // ---- Internal: file I/O ----
+   881→
+   882→    /**
+   883→     * Write a binary asset file. Respects `dryRun` and `overwrite` options.
+   884→     * Creates the parent directory if it doesn't exist.
+   885→     */
+   886→    private writeFile(filePath: string, bytes: Uint8Array): void {
+   887→        if (this.options.dryRun) {
+   888→            printDebug(`[dryrun] would write ${bytes.length} bytes to ${filePath}`);
+   889→            return;
+   890→        }
+   891→        if (fs.existsSync(filePath) && !this.options.overwrite) {
+   892→            // Backwards-compat: NEVER overwrite existing files. If a name
+   893→            // collision happens here, sanitizeName() should have already
+   894→            // picked a unique name. We log a warning and skip the write
+   895→            // (the existing file stays as-is).
+   896→            printWarning(`ContentFolderWriter: refusing to overwrite existing file ${filePath} (overwrite=false)`);
+   897→            return;
+   898→        }
+   899→        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+   900→        fs.writeFileSync(filePath, bytes);
+   901→    }
+   902→
+   903→    /**
+   904→     * Append a `[debugname]` block to an ini-style config file.
+   905→     *
+   906→     * Idempotency: before appending, the method scans the existing file
+   907→     * for a `[<debugname>]` header. If found, the existing block is
+   908→     * REPLACED (only when `overwrite=true`) or the append is skipped
+   909→     * (when `overwrite=false`). This makes second-run idempotent at the
+   910→     * config-file level even if the deps map's `transformedFrom` field
+   911→     * wasn't persisted.
+   912→     */
+   913→    private appendConfigBlock(filePath: string, lines: string[]): void {
+   914→        if (this.options.dryRun) {
+   915→            printDebug(`[dryrun] would append ${lines.length} lines to ${filePath}`);
+   916→            return;
+   917→        }
+   918→
+   919→        // Parse the header from the incoming block (first non-empty line
+   920→        // starting with `[`).
+   921→        const header = lines.find(l => l.startsWith('['));
+   922→        const debugname = header ? header.substring(1, header.length - 1) : null;
+   923→
+   924→        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+   925→
+   926→        let existing = '';
+   927→        if (fs.existsSync(filePath)) {
+   928→            existing = fs.readFileSync(filePath, 'utf8');
+   929→        }
+   930→
+   931→        // If the file already contains a `[<debugname>]` block, handle the
+   932→        // collision per the `overwrite` option.
+   933→        if (debugname && existing.includes(`[${debugname}]`)) {
+   934→            if (!this.options.overwrite) {
+   935→                printWarning(
+   936→                    `ContentFolderWriter: ${filePath} already contains [${debugname}] — skipping (overwrite=false)`
+   937→                );
+   938→                return;
+   939→            }
+   940→            // Overwrite mode: strip the existing block, then append the new one.
+   941→            existing = this.stripConfigBlock(existing, debugname);
+   942→        }
+   943→
+   944→        const newContent = existing + lines.join('\n') + '\n';
+   945→        fs.writeFileSync(filePath, newContent);
+   946→    }
+   947→
+   948→    /**
+   949→     * Remove an existing `[<debugname>]` block from an ini-style config
+   950→     * file's content. Returns the new content (without the block).
+   951→     *
+   952→     * A "block" is the `[header]` line plus every line after it until the
+   953→     * next `[`-prefixed line (or end of file). Blank lines immediately
+   954→     * preceding the next header are NOT removed (preserves file spacing).
+   955→     */
+   956→    private stripConfigBlock(content: string, debugname: string): string {
+   957→        const lines = content.split(/\r?\n/);
+   958→        const out: string[] = [];
+   959→        let skipping = false;
+   960→        for (const line of lines) {
+   961→            if (line.startsWith('[')) {
+   962→                if (line === `[${debugname}]`) {
+   963→                    skipping = true;
+   964→                    continue;
+   965→                }
+   966→                skipping = false;
+   967→            }
+   968→            if (!skipping) {
+   969→                out.push(line);
+   970→            }
+   971→        }
+   972→        return out.join('\n');
+   973→    }
+   974→
+   975→    // ---- Internal: pack-file management ----
+   976→
+   977→    /**
+   978→     * Load a pack file (without validator) into a `PackFileLike` instance.
+   979→     * Cached in `packCache` so subsequent lookups within the same writer
+   980→     * lifetime return the same in-memory instance.
+   981→     *
+   982→     * We use the existing `PackFile` class from `#/tools/pack/PackFileBase.js`
+   983→     * but construct it WITHOUT a validator — the validators do file-existence
+   984→     * checks during `reload()`, which we can't satisfy for not-yet-written
+   985→     * new assets.
+   986→     */
+   987→    private loadPackFile(packType: string): PackFileLike {
+   988→        let pack = this.packCache.get(packType);
+   989→        if (pack) {
+   990→            return pack;
+   991→        }
+   992→        pack = new PackFileLike(packType, this.contentDir);
+   993→        this.packCache.set(packType, pack);
+   994→        return pack;
+   995→    }
+   996→
+   997→    /**
+   998→     * Register a new (id, name) entry in a pack file. The pack file is
+   999→     * loaded (or fetched from cache), the entry is registered in-memory,
+  1000→     * and the file is marked as "dirty" for the batched `flushPackFiles()`
+  1001→     * call at the end of the import session.
+  1002→     *
+  1003→     * Idempotency: if the name is already registered (under any ID), the
+  1004→     * existing entry is left untouched and the function returns the
+  1005→     * existing ID. If the ID is already registered (under any name), the
+  1006→     * existing name is left untouched. This guarantees that re-running
+  1007→     * the writer never duplicates entries.
+  1008→     */
+  1009→    private updatePackFile(packType: string, id: number, name: string): void {
+  1010→        const pack = this.loadPackFile(packType);
+  1011→
+  1012→        // Check if the name is already registered.
+  1013→        const existingId = pack.getByName(name);
+  1014→        if (existingId !== -1) {
+  1015→            // Name collision — the writer's sanitizeName() should have
+  1016→            // prevented this, but defensive programming wins. Skip the
+  1017→            // re-registration and let the caller use the existing ID.
+  1018→            printWarning(
+  1019→                `ContentFolderWriter: pack '${packType}' already has name '${name}' (id=${existingId}); skipping duplicate registration`
+  1020→            );
+  1021→            return;
+  1022→        }
+  1023→
+  1024→        // Check if the ID is already registered (different name).
+  1025→        const existingName = pack.getById(id);
+  1026→        if (existingName) {
+  1027→            printWarning(
+  1028→                `ContentFolderWriter: pack '${packType}' already has id=${id} (name='${existingName}'); skipping duplicate registration`
+  1029→            );
+  1030→            return;
+  1031→        }
+  1032→
+  1033→        pack.register(id, name);
+  1034→        pack.markDirty();
+  1035→
+  1036→        // Track for ImportResult.packUpdates.
+  1037→        let added = this.packUpdates.get(packType);
+  1038→        if (!added) {
+  1039→            added = [];
+  1040→            this.packUpdates.set(packType, added);
+  1041→        }
+  1042→        added.push({ id, name });
+  1043→    }
+  1044→
+  1045→    /**
+  1046→     * Save all dirty pack files. Called once at the end of an import
+  1047→     * session so each pack file is written at most once.
+  1048→     */
+  1049→    private flushPackFiles(): void {
+  1050→        for (const [, pack] of this.packCache) {
+  1051→            pack.saveIfDirty();
+  1052→        }
+  1053→    }
+  1054→
+  1055→    // ---- Internal: ID allocation + name sanitization ----
+  1056→
+  1057→    /**
+  1058→     * Allocate the next free ID in a pack file. Uses `max(existing IDs) + 1`.
+  1059→     *
+  1060→     * For some pack types there may be reserved ranges in the future — for
+  1061→     * now, this is the simplest strategy that preserves backwards-compat
+  1062→     * (existing IDs are never reused or overwritten).
+  1063→     */
+  1064→    private allocateId(packType: string): number {
+  1065→        const pack = this.loadPackFile(packType);
+  1066→        if (pack.max === 0) {
+  1067→            // Empty pack — start at ID 0 (matches LostCity convention
+  1068→            // where every existing pack starts at ID 0).
+  1069→            return 0;
+  1070→        }
+  1071→        return pack.max;
+  1072→    }
+  1073→
+  1074→    /**
+  1075→     * Sanitize an OSRS-provided name into a valid LostCity debugname.
+  1076→     *
+  1077→     * Rules:
+  1078→     *   1. Lowercase.
+  1079→     *   2. Replace every char NOT in [a-z0-9] with `_`.
+  1080→     *   3. Collapse runs of multiple `_` into a single `_`.
+  1081→     *   4. Trim leading/trailing `_`.
+  1082→     *   5. Prefix with the configured `namePrefix` (default `osrs_`).
+  1083→     *   6. If the resulting name is already in the target pack (or in
+  1084→     *      this writer's session-reserved set), append `_2`, `_3`, ...
+  1085→     *      until unique.
+  1086→     *
+  1087→     * Examples:
+  1088→     *   "Tormented demon" → "osrs_tormented_demon"
+  1089→     *   "td_stand"        → "osrs_td_stand"
+  1090→     *   "model_45000"     → "osrs_model_45000"
+  1091→     */
+  1092→    private sanitizeName(rawName: string, packType: string): string {
+  1093→        // Step 1-4: lowercase + sanitize + collapse + trim.
+  1094→        let base = rawName.toLowerCase();
+  1095→        base = base.replace(/[^a-z0-9]+/g, '_');
+  1096→        base = base.replace(/_+/g, '_');
+  1097→        base = base.replace(/^_+|_+$/g, '');
+  1098→
+  1099→        // Step 5: prefix.
+  1100→        const prefixed = `${this.options.namePrefix}${base}`;
+  1101→
+  1102→        // Step 6: dedupe against existing pack + session-reserved names.
+  1103→        const pack = this.loadPackFile(packType);
+  1104→        let candidate = prefixed;
+  1105→        let suffix = 2;
+  1106→        // The pack's `getByName` returns -1 if not found. We also check
+  1107→        // the in-memory session-reserved set (populated by prior
+  1108→        // sanitizeName calls in the same import session) to handle the
+  1109→        // case where two OSRS assets sanitize to the same name in the
+  1110→        // same run.
+  1111→        while (pack.getByName(candidate) !== -1 || this.isSessionReserved(packType, candidate)) {
+  1112→            candidate = `${prefixed}_${suffix}`;
+  1113→            suffix++;
+  1114→        }
+  1115→
+  1116→        this.reserveSessionName(packType, candidate);
+  1117→        return candidate;
+  1118→    }
+  1119→
+  1120→    /**
+  1121→     * Session-reserved name set — prevents two assets in the same import
+  1122→     * run from being assigned the same debugname (which could happen if
+  1123→     * sanitizeName generates the same candidate twice before either is
+  1124→     * written to the pack file).
+  1125→     */
+  1126→    private readonly sessionReserved: Map<string, Set<string>> = new Map();
+  1127→
+  1128→    private isSessionReserved(packType: string, name: string): boolean {
+  1129→        return this.sessionReserved.get(packType)?.has(name) ?? false;
+  1130→    }
+  1131→
+  1132→    private reserveSessionName(packType: string, name: string): void {
+  1133→        let set = this.sessionReserved.get(packType);
+  1134→        if (!set) {
+  1135→            set = new Set();
+  1136→            this.sessionReserved.set(packType, set);
+  1137→        }
+  1138→        set.add(name);
+  1139→    }
+  1140→
+  1141→    // ---- Internal: NameResolver bootstrap + node ordering ----
+  1142→
+  1143→    /**
+  1144→     * Pre-populate NameResolver from any OSRS nodes in `depsMap` that
+  1145→     * already have `transformedFrom` set (from a prior writer run).
+  1146→     *
+  1147→     * For each such node, we know the new ID — but we need to look up the
+  1148→     * debugname from the corresponding pack file. If the pack file doesn't
+  1149→     * have an entry for that ID (e.g. the prior run was incomplete), we
+  1150→     * skip the bootstrap for that node and let it be re-imported.
+  1151→     */
+  1152→    private bootstrapResolverFromDepsMap(depsMap: DepsMap): void {
+  1153→        for (const key of Object.keys(depsMap.nodes)) {
+  1154→            const node = depsMap.nodes[key];
+  1155→            if (node.source !== 'osrs') {
+  1156→                continue;
+  1157→            }
+  1158→            if (node.transformedFrom === null || node.transformedFrom === undefined) {
+  1159→                continue;
+  1160→            }
+  1161→            const newId = typeof node.transformedFrom === 'string'
+  1162→                ? parseInt(node.transformedFrom, 10)
+  1163→                : node.transformedFrom;
+  1164→            if (!Number.isFinite(newId)) {
+  1165→                continue;
+  1166→            }
+  1167→            const packType = KIND_TO_PACK_TYPE[node.kind];
+  1168→            if (!packType) {
+  1169→                continue;
+  1170→            }
+  1171→            const pack = this.loadPackFile(packType);
+  1172→            const debugname = pack.getById(newId);
+  1173→            if (debugname) {
+  1174→                this.resolver.register(node.kind, node.id, newId, debugname);
+  1175→            }
+  1176→        }
+  1177→    }
+  1178→
+  1179→    /**
+  1180→     * Topologically sort the deps map's nodes so that models/anims are
+  1181→     * processed before seqs, and seqs before NPC configs.
+  1182→     *
+  1183→     * The dep tracer already walked the graph in dependency order, so the
+  1184→     * insertion order of `depsMap.nodes` is roughly correct — but to be
+  1185→     * safe, we apply an explicit ordering pass that buckets by kind.
+  1186→     *
+  1187→     * Order: model → anim-base → anim → seq → npc → (everything else).
+  1188→     */
+  1189→    private topoSortNodes(depsMap: DepsMap): DepNode[] {
+  1190→        const order: NodeKind[] = ['model', 'anim-base', 'anim', 'seq', 'npc'];
+  1191→        const buckets: Map<NodeKind, DepNode[]> = new Map();
+  1192→        for (const k of order) {
+  1193→            buckets.set(k, []);
+  1194→        }
+  1195→        const leftovers: DepNode[] = [];
+  1196→
+  1197→        for (const key of Object.keys(depsMap.nodes)) {
+  1198→            const node = depsMap.nodes[key];
+  1199→            const bucket = buckets.get(node.kind);
+  1200→            if (bucket) {
+  1201→                bucket.push(node);
+  1202→            } else {
+  1203→                leftovers.push(node);
+  1204→            }
+  1205→        }
+  1206→
+  1207→        const out: DepNode[] = [];
+  1208→        for (const k of order) {
+  1209→            out.push(...buckets.get(k)!);
+  1210→        }
+  1211→        out.push(...leftovers);
+  1212→        return out;
+  1213→    }
+  1214→}
+  1215→
+  1216→// ---- PackFileLike: thin wrapper around the existing PackFile class ----
+  1217→
+  1218→/**
+  1219→ * Local PackFile wrapper.
+  1220→ *
+  1221→ * We can't use the existing `PackFile` exports (`ModelPack`, `NpcPack`, etc.)
+  1222→ * directly because they're constructed WITH validators that run during
+  1223→ * `reload()`. The validators do file-existence checks (every registered
+  1224→ * name must have a corresponding file on disk) — that's fine at build time
+  1225→ * but breaks our writer's flow (we register the new name BEFORE writing
+  1226→ * the file, or in `dryRun` mode without writing anything).
+  1227→ *
+  1228→ * Instead we instantiate `PackFile` with `null` validator and call
+  1229→ * `load(path)` directly. This bypasses the validation but gives us the
+  1230→ * `register` / `getByName` / `getById` / `save` API we need.
+  1231→ *
+  1232→ * To avoid a circular import (`tools/osrs/` → `tools/pack/PackFileBase` →
+  1233→ * `tools/pack/Parse` → ...), we go through a dynamic import + minimal
+  1234→ * interface — but in practice the existing PackFile is fine to import
+  1235→ * directly (it's pure TypeScript, no init side effects beyond reading
+  1236→ * the pack file from disk in the constructor).
+  1237→ *
+  1238→ * We wrap it in our own class so we can:
+  1239→ *   - track dirty state (only save when changed)
+  1240→ *   - inject the `contentDir` (rather than relying on `Environment.BUILD_SRC_DIR`)
+  1241→ *   - keep the writer testable without polluting the global Environment.
+  1242→ */
+  1243→class PackFileLike {
+  1244→    private readonly packType: string;
+  1245→    private readonly contentDir: string;
+  1246→    /** Raw `id → name` map loaded from the pack file. */
+  1247→    private readonly pack: Map<number, string> = new Map();
+  1248→    /** Reverse lookup `name → id`. */
+  1249→    private readonly nameToId: Map<string, number> = new Map();
+  1250→    /** Highest ID seen + 1 (next free ID for `allocateId()`). */
+  1251→    max: number = 0;
+  1252→    /** Dirty flag — set when `register()` is called, cleared by `save()`. */
+  1253→    private dirty: boolean = false;
+  1254→
+  1255→    constructor(packType: string, contentDir: string) {
+  1256→        this.packType = packType;
+  1257→        this.contentDir = contentDir;
+  1258→        this.loadFromDisk();
+  1259→    }
+  1260→
+  1261→    /** Path of the pack file on disk. */
+  1262→    private get path(): string {
+  1263→        return path.join(this.contentDir, 'pack', `${this.packType}.pack`);
+  1264→    }
+  1265→
+  1266→    /** Load the pack file from disk (if it exists). */
+  1267→    private loadFromDisk(): void {
+  1268→        this.pack.clear();
+  1269→        this.nameToId.clear();
+  1270→        this.max = 0;
+  1271→
+  1272→        if (!fs.existsSync(this.path)) {
+  1273→            return;
+  1274→        }
+  1275→        const text = fs.readFileSync(this.path, 'utf8');
+  1276→        const lines = text.split(/\r?\n/);
+  1277→        for (const line of lines) {
+  1278→            if (line.length === 0 || !/^\d+=/g.test(line)) {
+  1279→                continue;
+  1280→            }
+  1281→            const eqIdx = line.indexOf('=');
+  1282→            const id = parseInt(line.substring(0, eqIdx), 10);
+  1283→            const name = line.substring(eqIdx + 1);
+  1284→            if (Number.isNaN(id) || name.length === 0) {
+  1285→                continue;
+  1286→            }
+  1287→            this.pack.set(id, name);
+  1288→            this.nameToId.set(name, id);
+  1289→        }
+  1290→        if (this.pack.size > 0) {
+  1291→            this.max = Math.max(...Array.from(this.pack.keys())) + 1;
+  1292→        }
+  1293→    }
+  1294→
+  1295→    /** Register a new (id, name) entry. Does NOT save to disk. */
+  1296→    register(id: number, name: string): void {
+  1297→        this.pack.set(id, name);
+  1298→        this.nameToId.set(name, id);
+  1299→        if (id >= this.max) {
+  1300→            this.max = id + 1;
+  1301→        }
+  1302→        this.dirty = true;
+  1303→    }
+  1304→
+  1305→    /** Look up a name by ID. Returns empty string if not found. */
+  1306→    getById(id: number): string {
+  1307→        return this.pack.get(id) ?? '';
+  1308→    }
+  1309→
+  1310→    /** Look up an ID by name. Returns -1 if not found. */
+  1311→    getByName(name: string): number {
+  1312→        return this.nameToId.get(name) ?? -1;
+  1313→    }
+  1314→
+  1315→    /** Mark the pack file as dirty (will be saved by `saveIfDirty()`). */
+  1316→    markDirty(): void {
+  1317→        this.dirty = true;
+  1318→    }
+  1319→
+  1320→    /**
+  1321→     * Save the pack file to disk IF it has been modified since the last
+  1322→     * load/save. The save writes the FULL pack file (existing entries +
+  1323→     * any new registrations) in ID-sorted order, mirroring the existing
+  1324→     * `PackFile.save()` implementation.
+  1325→     */
+  1326→    saveIfDirty(): void {
+  1327→        if (!this.dirty) {
+  1328→            return;
+  1329→        }
+  1330→        fs.mkdirSync(path.dirname(this.path), { recursive: true });
+  1331→        const entries = Array.from(this.pack.entries()).sort((a, b) => a[0] - b[0]);
+  1332→        const text = entries.map(([id, name]) => `${id}=${name}`).join('\n') + '\n';
+  1333→        fs.writeFileSync(this.path, text);
+  1334→        this.dirty = false;
+  1335→    }
+  1336→}
+  1337→

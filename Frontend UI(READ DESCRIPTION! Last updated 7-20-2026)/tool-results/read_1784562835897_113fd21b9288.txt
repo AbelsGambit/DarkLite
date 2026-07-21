@@ -1,0 +1,909 @@
+     1→/**
+     2→ * TormentedDemonFixture.ts — Part A of the Tormented Demon end-to-end pilot
+     3→ * (Task 10 of the OSRS → 377 model pipeline).
+     4→ *
+     5→ * Synthesizes a minimal but realistic OSRS-shaped test fixture for the
+     6→ * Tormented Demon NPC, then exposes it via a `StubCacheReader` that
+     7→ * implements the same `CacheReader` interface Task 7's
+     8→ * `OsrsCacheAssetReader` does. The fixture is small enough to inspect by
+     9→ * hand but realistic enough to exercise every code path in Tasks 5-9's
+    10→ * pipeline (model decode, anim frame decode, anim-base load, seq config
+    11→ * parse, NPC config parse, dependency trace, content-folder write,
+    12→ * variant registration).
+    13→ *
+    14→ * ----------------------------------------------------------------------------
+    15→ * Why a StubCacheReader instead of a real JS5 store on disk?
+    16→ * ----------------------------------------------------------------------------
+    17→ *
+    18→ * The task spec offered a fallback: "If writing a real JS5 store from
+    19→ * scratch is too involved, you have a fallback: write a `StubCacheReader`
+    20→ * that implements the `CacheReader` interface directly (bypassing
+    21→ * `OsrsCacheReader`) and returns the synthesized `OsrsModel` /
+    22→ * `OsrsAnimFrame` / etc objects in-memory. This is acceptable for the
+    23→ * pilot — the real OsrsCacheReader (Task 7) is already tested separately.
+    24→ *
+    25→ * We took the fallback. Rationale:
+    26→ *   - The real `OsrsCacheReader` (Task 7) already has 29 self-test
+    27→ *     assertions covering sector walking, container decompression, master
+    28→ *     index parsing, and multi-child archive splitting. Re-implementing
+    29→ *     the JS5 sector-walking + container compression + master index
+    30→ *     hashing just to feed bytes back into the same decoders adds no
+    31→ *     coverage to the OSRS bytes → asset path; it would only test our
+    32→ *     JS5 packer, which is a different concern.
+    33→ *   - The pilot's goal is to prove the END-TO-END pipeline (decode →
+    34→ *     trace → transform → write → register) works on realistic OSRS
+    35→ *     bytes. The StubCacheReader uses the REAL OSRS decoders
+    36→ *     (`OsrsModel.decode`, `OsrsAnimFrame.decode`, `OsrsNpcType.decode`,
+    37→ *     `OsrsSeqType.decode`) on synthesized bytes that match the OSRS
+    38→ *     on-disk format byte-for-byte. Every code path the pipeline would
+    39→ *     hit on a real OSRS cache is exercised here.
+    40→ *   - The real-cache path (Part C) is already shipped as Task 8's
+    41→ *     `Import.ts` CLI — when the user drops an OSRS cache into
+    42→ *     `engine/data/osrs-cache/`, the same `OsrsCacheAssetReader` that
+    43→ *     Task 7 built will produce identical `OsrsModel`/`OsrsAnimFrame`/
+    44→ *     etc instances from the real bytes. The pilot just stubs the
+    45→ *     byte-source layer.
+    46→ *
+    47→ * ----------------------------------------------------------------------------
+    48→ * What the fixture synthesizes
+    49→ * ----------------------------------------------------------------------------
+    50→ *
+    51→ * All bytes are written byte-by-byte using `Packet`'s `p1/p2/pjstr/p4`
+    52→ * methods, matching the OSRS on-disk layout the decoders expect:
+    53→ *
+    54→ *   - 1 OSRS model blob (archive 1 file 46001) — 4 vertices, 2 triangles,
+    55→ *     version=1. Minimal but valid: includes vertex flags, triangle
+    56→ *     orientation bytes, colours, and triangle vertex indices. All
+    57→ *     optional sections (skins, textures, alphas, tags, labels) omitted.
+    58→ *
+    59→ *   - 1 OSRS AnimBase blob (archive 0 file 47001) — skeleton with 5
+    60→ *     transforms: OP_BASE, OP_TRANSLATE, OP_ROTATE, OP_SCALE, OP_ALPHA.
+    61→ *     Each bone has 1 label (value 0). Byte-identical to the 377 skeleton
+    62→ *     format — pre-HD OSRS content uses the same layout.
+    63→ *
+    64→ *   - 2 OSRS anim frame blobs (archive 0 files 2005 and 2006) — each
+    65→ *     with frameLength=5, base ID 47001 (the AnimBase above), delay=2.
+    66→ *     Frame 2005 sets group 0 (OP_BASE) X/Y/Z and group 1 (OP_TRANSLATE)
+    67→ *     X. Frame 2006 sets group 0 (OP_BASE) X/Y/Z only (the "attack"
+    68→ *     frame). Both end with a 2-byte trailing base ID matching the
+    69→ *     OSRS frame format.
+    70→ *
+    71→ *   - 1 OSRS seq config (seq.dat entry 9501, debugname=`td_stand`) —
+    72→ *     1 frame pointing to OSRS anim 2005, delay=2, priority=5.
+    73→ *
+    74→ *   - 1 OSRS seq config (seq.dat entry 9502, debugname=`td_attack`) —
+    75→ *     1 frame pointing to OSRS anim 2006, delay=2, priority=5.
+    76→ *
+    77→ *   - 1 OSRS NPC config (npc.dat entry 9501, debugname=`tormented_demon`,
+    78→ *     name="Tormented demon") — references model 46001 (body),
+    79→ *     head model 46002, readyanim=9501 (td_stand), walkanim=9501,
+    80→ *     stats=[200,150,180,350,1,250], params include attack_anim=9502
+    81→ *     (seq ref) and death_anim=9502 (seq ref).
+    82→ *
+    83→ *   - 1 fake combat script at `<cacheDir>/scripts/npc/scripts/tormented_demon.rs2`
+    84→ *     (placeholder runescript with a `[ai_applayer2,Tormented demon]`
+    85→ *     dispatch directive referencing the NPC by display name, plus
+    86→ *     `inv_has(worn, fire_shield)` and `inv_total(worn, fire_shield)`
+    87→ *     call sites so the dep tracer's script scanner discovers the
+    88→ *     `fire_shield` obj ref and records it as a missing dep — proving
+    89→ *     the tracer walks the script → obj edge).
+    90→ *
+    91→ * The fixture also pre-populates `AnimBase.instances[47001]` so the
+    92→ * OSRS anim frame decoder can find the skeleton it references (the
+    93→ * `OsrsAnimFrame.decode()` bails with a warning if the base is missing).
+    94→ *
+    95→ * ----------------------------------------------------------------------------
+    96→ * Cleanup
+    97→ * ----------------------------------------------------------------------------
+    98→ *
+    99→ * The fixture writes to `<os.tmpdir()>/osrs-td-fixture/` (or `$TMPDIR`).
+   100→ * The pilot script (`PilotTormentedDemon.ts`) cleans up the temp dir on
+   101→ * exit unless `--keep-fixture` is passed.
+   102→ */
+   103→
+   104→import fs from 'fs';
+   105→import os from 'os';
+   106→import path from 'path';
+   107→
+   108→import Packet from '#/io/Packet.js';
+   109→import { printInfo, printWarning } from '#/util/Logger.js';
+   110→
+   111→import AnimBase from '#/cache/graphics/AnimBase.js';
+   112→import OsrsModel from '#/cache/osrs/OsrsModel.js';
+   113→import OsrsAnimFrame from '#/cache/osrs/OsrsAnimFrame.js';
+   114→import OsrsSeqType from '#/cache/osrs/OsrsSeqType.js';
+   115→import OsrsNpcType from '#/cache/osrs/OsrsNpcType.js';
+   116→import ObjType from '#/cache/config/ObjType.js';
+   117→import ParamType from '#/cache/config/ParamType.js';
+   118→import ScriptVarType from '#/cache/config/ScriptVarType.js';
+   119→import StructType from '#/cache/config/StructType.js';
+   120→
+   121→import { CacheReader } from '../DependencyTracer.js';
+   122→import { NodeKind } from '../DepsSchema.js';
+   123→
+   124→// ---- Fixture constants (OSRS-side IDs the fixture synthesizes) ----
+   125→
+   126→/** OSRS NPC ID for the Tormented Demon (in the synthesized fixture). */
+   127→export const TD_NPC_ID = 9501;
+   128→/** OSRS model ID for the body mesh. */
+   129→export const TD_MODEL_ID = 46001;
+   130→/** OSRS model ID for the head mesh. */
+   131→export const TD_HEAD_MODEL_ID = 46002;
+   132→/** OSRS AnimBase (skeleton) ID. */
+   133→export const TD_BASE_ID = 47001;
+   134→/** OSRS anim frame ID for the stand frame. */
+   135→export const TD_ANIM_STAND_ID = 2005;
+   136→/** OSRS anim frame ID for the attack frame. */
+   137→export const TD_ANIM_ATTACK_ID = 2006;
+   138→/** OSRS seq ID for td_stand (combat idle). */
+   139→export const TD_SEQ_STAND_ID = 9501;
+   140→/** OSRS seq ID for td_attack (used for both attack_anim + death_anim params). */
+   141→export const TD_SEQ_ATTACK_ID = 9502;
+   142→/** OSRS param ID for the `attack_anim` param (seq-typed). */
+   143→export const TD_PARAM_ATTACK_ANIM = 1234;
+   144→/** OSRS param ID for the `death_anim` param (seq-typed). */
+   145→export const TD_PARAM_DEATH_ANIM = 1235;
+   146→
+   147→/**
+   148→ * Number of dep nodes the tracer is expected to discover for this fixture.
+   149→ *
+   150→ * Nodes:
+   151→ *   1. npc:9501            (root)
+   152→ *   2. model:46001         (body, via models[0])
+   153→ *   3. model:46002         (head, via heads[0])
+   154→ *   4. seq:9501            (readyanim + walkanim — deduped to 1)
+   155→ *   5. seq:9502            (attack_anim param + death_anim param — deduped to 1)
+   156→ *   6. anim:2005           (frame for td_stand)
+   157→ *   7. anim:2006           (frame for td_attack)
+   158→ *   8. anim-base:47001     (skeleton, via anim.base)
+   159→ *   9. param:1234          (attack_anim — type unknown, recorded as leaf)
+   160→ *  10. param:1235          (death_anim — type unknown, recorded as leaf)
+   161→ *  11. script:tormented_demon  (combat script, found via dispatch scan)
+   162→ *
+   163→ * Plus 1 missing dep ref (the `fire_shield` obj ref discovered by the script
+   164→ * scanner — recorded as a missing leaf, NOT a node in `nodes`, but appears
+   165→ * in the top-level `missing[]` array).
+   166→ *
+   167→ * Total nodes = 11.
+   168→ */
+   169→export const EXPECTED_DEP_NODES = 11;
+   170→
+   171→// ---- Fixture return type ----
+   172→
+   173→export interface TormentedDemonFixture {
+   174→    /** Temp directory containing the fixture's files (script, etc). */
+   175→    cacheDir: string;
+   176→    /** OSRS NPC ID the pilot should trace (9501). */
+   177→    npcId: number;
+   178→    /** Expected number of nodes in the traced DepsMap. */
+   179→    expectedDeps: number;
+   180→    /** Path to the synthesized combat script `.rs2` file. */
+   181→    scriptPath: string;
+   182→    /** Directory containing `npc/scripts/` — pass this to the tracer's `scriptDir` option. */
+   183→    scriptDir: string;
+   184→}
+   185→
+   186→// ---- Byte-blob synthesizers ----
+   187→
+   188→/**
+   189→ * Append a signed smart-encoded value to a byte array.
+   190→ *
+   191→ * Matches the format read by `Packet.gsmart()`:
+   192→ *   - value in [-64, 63]        -> 1 byte  = value + 0x40
+   193→ *   - value in [-16384, 16383]  -> 2 bytes = value + 0xc000 (big-endian)
+   194→ *
+   195→ * Local copy of the helper in `OsrsModel.ts` / `OsrsAnimFrame.ts` — used
+   196→ * here to emit the model's vertex-delta and triangle-index streams. If
+   197→ * this proves generally useful, future task should hoist it into
+   198→ * `Packet.ts` as `psmartSigned()` (per Task 5-a's next-action hook).
+   199→ */
+   200→function psmartSigned(out: number[], value: number): void {
+   201→    if (value >= -64 && value <= 63) {
+   202→        out.push((value + 0x40) & 0xff);
+   203→    } else if (value >= -16384 && value <= 16383) {
+   204→        const v: number = (value + 0xc000) & 0xffff;
+   205→        out.push((v >> 8) & 0xff);
+   206→        out.push(v & 0xff);
+   207→    } else {
+   208→        throw new Error(`psmartSigned: value ${value} out of smart range [-16384, 16383]`);
+   209→    }
+   210→}
+   211→
+   212→/**
+   213→ * Synthesize a minimal but valid OSRS model blob.
+   214→ *
+   215→ * Layout (matching `OsrsModel.decode` byte-for-byte):
+   216→ *
+   217→ *   body:
+   218→ *     [vertex flags]     4 bytes (all 0 — no deltas, all vertices at origin)
+   219→ *     [vertex X]         0 bytes (all deltas 0 → no X bytes emitted)
+   220→ *     [vertex Y]         0 bytes
+   221→ *     [vertex Z]         0 bytes
+   222→ *     [vertex labels]    absent (hasVertexLabels = 0)
+   223→ *     [triangle orient]  2 bytes ([1, 1] — both triangles are type 1)
+   224→ *     [triangle colours] 4 bytes (2 triangles × u16 each — colour 0x1234)
+   225→ *     [triangle infos]   absent (hasFaceColors = 0)
+   226→ *     [triangle materials] absent
+   227→ *     [triangle alphas]  absent
+   228→ *     [triangle tags]    absent
+   229→ *     [triangle priorities] absent (priority = 0, not 255)
+   230→ *     [triangle verts]   6 bytes (3 smart-encoded deltas per type-1 triangle)
+   231→ *     [texture UVs]      absent (triangleTextureCount = 0)
+   232→ *     [triangle skins]   absent
+   233→ *     [vertex skins]     absent
+   234→ *   trailer (23 bytes):
+   235→ *     version=1, vertexCount=4, triangleCount=2, triangleTextureCount=0,
+   236→ *     hasFaceColors=0, hasFaceTextures=0, priority=0, hasFaceAlphas=0,
+   237→ *     hasTriangleTags=0, hasVertexLabels=0,
+   238→ *     dataLenVertexX=0, dataLenVertexY=0, dataLenVertexZ=0,
+   239→ *     dataLenFaceOrientations=6, triangleSkinCount=0, vertexSkinCount=0,
+   240→ *     maxDepth=0
+   241→ *
+   242→ * Triangle vertex indices (type-1 encoding, 3 deltas per triangle):
+   243→ *   triangle 0: vertices (0, 1, 2). With last=0 (initial):
+   244→ *     delta_a = 0-0 = 0  → smart 0x40
+   245→ *     delta_b = 1-0 = 1  → smart 0x41
+   246→ *     delta_c = 2-1 = 1  → smart 0x41
+   247→ *     last = 2
+   248→ *   triangle 1: vertices (0, 2, 3). With last=2:
+   249→ *     delta_a = 0-2 = -2 → smart 0x3e
+   250→ *     delta_b = 2-0 = 2  → smart 0x42
+   251→ *     delta_c = 3-2 = 1  → smart 0x41
+   252→ *
+   253→ * Total body: 4 + 0 + 0 + 0 + 0 + 2 + 4 + 6 = 16 bytes.
+   254→ * Total blob: 16 + 23 = 39 bytes.
+   255→ */
+   256→function synthesizeOsrsModelBlob(): Uint8Array {
+   257→    const body: number[] = [];
+   258→
+   259→    // 1. vertex flags (4 bytes, all 0 — no deltas)
+   260→    body.push(0, 0, 0, 0);
+   261→
+   262→    // 2-4. vertex X/Y/Z — omitted (all deltas are 0).
+   263→
+   264→    // 5. vertex labels — omitted (hasVertexLabels = 0).
+   265→
+   266→    // 5.5 triangle orientation bytes (2 bytes — both type 1)
+   267→    body.push(1, 1);
+   268→
+   269→    // 6. triangle colours (2 × u16 = 4 bytes) — colour 0x1234 each.
+   270→    body.push(0x12, 0x34);
+   271→    body.push(0x12, 0x34);
+   272→
+   273→    // 7-10.5 optional sections — all omitted (flags are 0).
+   274→
+   275→    // 11. triangle vertex indices (smart-encoded deltas)
+   276→    // triangle 0: deltas (0, 1, 1)
+   277→    psmartSigned(body, 0);
+   278→    psmartSigned(body, 1);
+   279→    psmartSigned(body, 1);
+   280→    // triangle 1: deltas (-2, 2, 1)
+   281→    psmartSigned(body, -2);
+   282→    psmartSigned(body, 2);
+   283→    psmartSigned(body, 1);
+   284→
+   285→    const dataLenFaceOrientations = 6; // 3 bytes × 2 triangles
+   286→    const dataLenX = 0;
+   287→    const dataLenY = 0;
+   288→    const dataLenZ = 0;
+   289→
+   290→    // 12-14. optional sections — omitted.
+   291→
+   292→    // ---- 23-byte OSRS trailer ----
+   293→    const trailer: number[] = [];
+   294→    trailer.push(1);           // version (>= 1 = OSRS)
+   295→    trailer.push(0, 4);        // vertexCount = 4 (u16 BE)
+   296→    trailer.push(0, 2);        // triangleCount = 2 (u16 BE)
+   297→    trailer.push(0);           // triangleTextureCount = 0
+   298→    trailer.push(0);           // hasFaceColors = 0
+   299→    trailer.push(0);           // hasFaceTextures = 0
+   300→    trailer.push(0);           // priority = 0 (shared; not 255 = no per-face)
+   301→    trailer.push(0);           // hasFaceAlphas = 0
+   302→    trailer.push(0);           // hasTriangleTags = 0
+   303→    trailer.push(0);           // hasVertexLabels = 0
+   304→    trailer.push((dataLenX >> 8) & 0xff, dataLenX & 0xff);
+   305→    trailer.push((dataLenY >> 8) & 0xff, dataLenY & 0xff);
+   306→    trailer.push((dataLenZ >> 8) & 0xff, dataLenZ & 0xff);
+   307→    trailer.push((dataLenFaceOrientations >> 8) & 0xff, dataLenFaceOrientations & 0xff);
+   308→    trailer.push(0);           // triangleSkinCount = 0
+   309→    trailer.push(0);           // vertexSkinCount = 0
+   310→    trailer.push(0);           // maxDepth = 0
+   311→
+   312→    const total = body.length + trailer.length;
+   313→    const out = new Packet(new Uint8Array(total));
+   314→    for (const b of body) {
+   315→        out.p1(b);
+   316→    }
+   317→    for (const b of trailer) {
+   318→        out.p1(b);
+   319→    }
+   320→    return out.data;
+   321→}
+   322→
+   323→/**
+   324→ * Synthesize a minimal OSRS AnimBase (skeleton) blob.
+   325→ *
+   326→ * Layout (byte-identical to 377 skeleton format):
+   327→ *   length: u8 = 5
+   328→ *   types:  u8 × 5 = [0, 1, 2, 3, 5]  (OP_BASE, OP_TRANSLATE, OP_ROTATE, OP_SCALE, OP_ALPHA)
+   329→ *   labels: per i, count: u8 = 1, then 1 × u8 = 0
+   330→ *
+   331→ * Total: 1 + 5 + 5*(1+1) = 16 bytes.
+   332→ */
+   333→function synthesizeOsrsAnimBaseBlob(): Uint8Array {
+   334→    const bytes: number[] = [];
+   335→    bytes.push(5);                              // length
+   336→    bytes.push(0, 1, 2, 3, 5);                  // types (5 bones)
+   337→    for (let i = 0; i < 5; i++) {
+   338→        bytes.push(1);                          // labelCount = 1
+   339→        bytes.push(0);                          // label[0] = 0
+   340→    }
+   341→    return new Uint8Array(bytes);
+   342→}
+   343→
+   344→/**
+   345→ * Synthesize a minimal OSRS anim frame blob.
+   346→ *
+   347→ * Layout (matching `OsrsAnimFrame.decode` byte-for-byte):
+   348→ *
+   349→ *   body (before trailing 2-byte base ID):
+   350→ *     u16 frameLength          = 5
+   351→ *     per group 0..4:
+   352→ *       u8 flags               (group 0: 0x7 = X+Y+Z; group 1: 0x1 = X; others: 0)
+   353→ *       smart X (if flag & 0x1)
+   354→ *       smart Y (if flag & 0x2)
+   355→ *       smart Z (if flag & 0x4)
+   356→ *     u8 delay                 = 2
+   357→ *   trailer (2 bytes):
+   358→ *     u16 baseId
+   359→ *
+   360→ * For frame 2005 (stand):
+   361→ *   group 0 (OP_BASE): flags=0x7, X=10, Y=20, Z=30 (3 smart bytes)
+   362→ *   group 1 (OP_TRANSLATE): flags=0x1, X=5 (1 smart byte)
+   363→ *   groups 2,3,4: flags=0
+   364→ *
+   365→ * For frame 2006 (attack):
+   366→ *   group 0 (OP_BASE): flags=0x7, X=0, Y=0, Z=0 (3 smart bytes)
+   367→ *   groups 1,2,3,4: flags=0
+   368→ *
+   369→ * Total blob: 2 (frameLength) + (1+3) + (1+1) + 1 + 1 + 1 (3 zero-flag groups) + 1 (delay) + 2 (baseId) = 13 bytes for frame 2005.
+   370→ */
+   371→function synthesizeOsrsAnimFrameBlob(baseId: number, x: number, y: number, z: number, translateX: number): Uint8Array {
+   372→    const bytes: number[] = [];
+   373→    // u16 frameLength = 5
+   374→    bytes.push((5 >> 8) & 0xff, 5 & 0xff);
+   375→
+   376→    // group 0 (OP_BASE): flags=0x7, X=x, Y=y, Z=z
+   377→    bytes.push(0x7);
+   378→    psmartSigned(bytes, x);
+   379→    psmartSigned(bytes, y);
+   380→    psmartSigned(bytes, z);
+   381→
+   382→    // group 1 (OP_TRANSLATE): flags=0x1, X=translateX
+   383→    bytes.push(0x1);
+   384→    psmartSigned(bytes, translateX);
+   385→
+   386→    // groups 2, 3, 4: flags=0
+   387→    bytes.push(0, 0, 0);
+   388→
+   389→    // u8 delay = 2
+   390→    bytes.push(2);
+   391→
+   392→    // trailing u16 baseId
+   393→    bytes.push((baseId >> 8) & 0xff, baseId & 0xff);
+   394→
+   395→    return new Uint8Array(bytes);
+   396→}
+   397→
+   398→/**
+   399→ * Synthesize an OSRS seq config blob.
+   400→ *
+   401→ * Layout (matching `OsrsSeqType.decode` byte-for-byte):
+   402→ *
+   403→ *   opcode 1 (frames):  u8 frameCount, then per frame: u16 frameId, u16 iframeId, u16 delay
+   404→ *   opcode 250:         gjstr debugname
+   405→ *   opcode 0:           end
+   406→ *
+   407→ * For 1 frame pointing to OSRS anim `frameId` with delay=2, debugname=<debugname>:
+   408→ *   bytes: 1 (opcode), 1 (frameCount), 2 (frameId), 2 (iframeId=65535→-1), 2 (delay), 1 (opcode 250), N (debugname chars) + 1 (terminator), 1 (opcode 0)
+   409→ */
+   410→function synthesizeOsrsSeqBlob(frameId: number, debugname: string): Uint8Array {
+   411→    const bytes: number[] = [];
+   412→    // opcode 1: frames
+   413→    bytes.push(1);
+   414→    bytes.push(1);                                          // frameCount = 1
+   415→    bytes.push((frameId >> 8) & 0xff, frameId & 0xff);     // frameId
+   416→    bytes.push(0xff, 0xff);                                 // iframeId = 65535 → -1
+   417→    bytes.push(0, 2);                                       // delay = 2
+   418→
+   419→    // opcode 250: debugname
+   420→    bytes.push(250);
+   421→    for (let i = 0; i < debugname.length; i++) {
+   422→        bytes.push(debugname.charCodeAt(i) & 0xff);
+   423→    }
+   424→    bytes.push(10);  // gjstr terminator
+   425→
+   426→    // opcode 0: end
+   427→    bytes.push(0);
+   428→
+   429→    return new Uint8Array(bytes);
+   430→}
+   431→
+   432→/**
+   433→ * Synthesize an OSRS NPC config blob for the Tormented Demon.
+   434→ *
+   435→ * Layout (matching `OsrsNpcType.decode` byte-for-byte). Only opcodes the
+   436→ * fixture needs are emitted:
+   437→ *
+   438→ *   opcode 1   (models):       u8 count=1, u16 modelId=46001
+   439→ *   opcode 2   (name):         gjstr "Tormented demon"
+   440→ *   opcode 13  (readyanim):    u16 9501
+   441→ *   opcode 14  (walkanim):     u16 9501
+   442→ *   opcode 60  (heads):        u8 count=1, u16 headModelId=46002
+   443→ *   opcode 74  (atk stat):     u16 200
+   444→ *   opcode 75  (def stat):     u16 150
+   445→ *   opcode 76  (str stat):     u16 180
+   446→ *   opcode 77  (hp stat):      u16 350
+   447→ *   opcode 78  (range stat):   u16 1
+   448→ *   opcode 79  (mage stat):    u16 250
+   449→ *   opcode 249 (params):       u8 count=2, then per param:
+   450→ *                              u24 key (g3), u1 isString=0, u32 value (g4s)
+   451→ *                              (param 1234 → seq 9502, param 1235 → seq 9502)
+   452→ *   opcode 250 (debugname):    gjstr "tormented_demon"
+   453→ *   opcode 0   (end)
+   454→ */
+   455→function synthesizeOsrsNpcBlob(): Uint8Array {
+   456→    const bytes: number[] = [];
+   457→
+   458→    // opcode 1: models
+   459→    bytes.push(1);
+   460→    bytes.push(1);                                                  // count = 1
+   461→    bytes.push((TD_MODEL_ID >> 8) & 0xff, TD_MODEL_ID & 0xff);     // model 46001
+   462→
+   463→    // opcode 2: name
+   464→    bytes.push(2);
+   465→    const name = 'Tormented demon';
+   466→    for (let i = 0; i < name.length; i++) {
+   467→        bytes.push(name.charCodeAt(i) & 0xff);
+   468→    }
+   469→    bytes.push(10);  // gjstr terminator
+   470→
+   471→    // opcode 13: readyanim
+   472→    bytes.push(13);
+   473→    bytes.push((TD_SEQ_STAND_ID >> 8) & 0xff, TD_SEQ_STAND_ID & 0xff);
+   474→
+   475→    // opcode 14: walkanim
+   476→    bytes.push(14);
+   477→    bytes.push((TD_SEQ_STAND_ID >> 8) & 0xff, TD_SEQ_STAND_ID & 0xff);
+   478→
+   479→    // opcode 60: heads
+   480→    bytes.push(60);
+   481→    bytes.push(1);                                                       // count = 1
+   482→    bytes.push((TD_HEAD_MODEL_ID >> 8) & 0xff, TD_HEAD_MODEL_ID & 0xff); // head 46002
+   483→
+   484→    // opcodes 74..79: stats
+   485→    const stats = [200, 150, 180, 350, 1, 250];
+   486→    for (let i = 0; i < stats.length; i++) {
+   487→        bytes.push(74 + i);
+   488→        const s = stats[i];
+   489→        bytes.push((s >> 8) & 0xff, s & 0xff);
+   490→    }
+   491→
+   492→    // opcode 249: params
+   493→    bytes.push(249);
+   494→    bytes.push(2);  // count = 2 params
+   495→
+   496→    // param 1234 (attack_anim) → seq 9502 (encoded as signed int32)
+   497→    writeParam(bytes, TD_PARAM_ATTACK_ANIM, false, TD_SEQ_ATTACK_ID);
+   498→    // param 1235 (death_anim) → seq 9502
+   499→    writeParam(bytes, TD_PARAM_DEATH_ANIM, false, TD_SEQ_ATTACK_ID);
+   500→
+   501→    // opcode 250: debugname
+   502→    bytes.push(250);
+   503→    const debugname = 'tormented_demon';
+   504→    for (let i = 0; i < debugname.length; i++) {
+   505→        bytes.push(debugname.charCodeAt(i) & 0xff);
+   506→    }
+   507→    bytes.push(10);  // gjstr terminator
+   508→
+   509→    // opcode 0: end
+   510→    bytes.push(0);
+   511→
+   512→    return new Uint8Array(bytes);
+   513→}
+   514→
+   515→/**
+   516→ * Helper: write a single param entry inside an opcode 249 block.
+   517→ *
+   518→ * Layout (per `ParamHelper.decodeParams`):
+   519→ *   u24 key (3 bytes BE)
+   520→ *   u1 isString (1 byte — 0 for int, 1 for string)
+   521→ *   if isString: gjstr value
+   522→ *   else:        i32 value (4 bytes BE, signed)
+   523→ */
+   524→function writeParam(out: number[], key: number, isString: boolean, value: number | string): void {
+   525→    // u24 key (3 bytes BE)
+   526→    out.push((key >> 16) & 0xff);
+   527→    out.push((key >> 8) & 0xff);
+   528→    out.push(key & 0xff);
+   529→    // u1 isString
+   530→    out.push(isString ? 1 : 0);
+   531→    if (isString) {
+   532→        const s = String(value);
+   533→        for (let i = 0; i < s.length; i++) {
+   534→            out.push(s.charCodeAt(i) & 0xff);
+   535→        }
+   536→        out.push(10);  // gjstr terminator
+   537→    } else {
+   538→        // i32 BE signed
+   539→        const v = value as number | 0;
+   540→        out.push((v >>> 24) & 0xff);
+   541→        out.push((v >>> 16) & 0xff);
+   542→        out.push((v >>> 8) & 0xff);
+   543→        out.push(v & 0xff);
+   544→    }
+   545→}
+   546→
+   547→// ---- StubCacheReader: wraps the synthesized bytes and uses the real OSRS decoders ----
+   548→
+   549→/**
+   550→ * Stub `CacheReader` for the Tormented Demon fixture.
+   551→ *
+   552→ * Implements the same `CacheReader` interface as Task 7's
+   553→ * `OsrsCacheAssetReader`, but instead of reading bytes from a real JS5
+   554→ * cache on disk, it returns synthesized OSRS blobs from in-memory
+   555→ * `Uint8Array`s. The blobs are then decoded by the REAL OSRS decoders
+   556→ * (`OsrsModel.decode`, `OsrsAnimFrame.decode`, etc.) — so every code path
+   557→ * the pipeline would hit on a real OSRS cache is exercised here.
+   558→ *
+   559→ * The reader pre-loads the synthesized AnimBase into
+   560→ * `AnimBase.instances[47001]` in its constructor (mirroring what
+   561→ * `OsrsCacheAssetReader.readAnimBase` does on demand). The
+   562→ * `OsrsAnimFrame.decode()` call requires the base to be present.
+   563→ *
+   564→ * For obj/param/struct/texture/particle/sound reads, this stub returns
+   565→ * `null` — matching Task 7's behavior for asset types whose OSRS-native
+   566→ * decoders aren't ported yet. The dep tracer records these as missing
+   567→ * leaves, which is the expected behavior.
+   568→ */
+   569→export class TormentedDemonStubReader implements CacheReader {
+   570→    /** Synthesized OSRS model bytes (body model + head model). */
+   571→    private readonly modelBytes: Map<number, Uint8Array> = new Map();
+   572→    /** Synthesized OSRS anim frame bytes. */
+   573→    private readonly animBytes: Map<number, Uint8Array> = new Map();
+   574→    /** Synthesized OSRS AnimBase bytes. */
+   575→    private readonly baseBytes: Map<number, Uint8Array> = new Map();
+   576→    /** Synthesized OSRS seq config bytes (parsed on first read). */
+   577→    private readonly seqBytes: Map<number, Uint8Array> = new Map();
+   578→    /** Synthesized OSRS NPC config bytes (parsed on first read). */
+   579→    private readonly npcBytes: Map<number, Uint8Array> = new Map();
+   580→
+   581→    /** Whether `parseNpcConfigs` / `parseSeqConfigs` have run yet. */
+   582→    private npcParsed: boolean = false;
+   583→    private seqParsed: boolean = false;
+   584→
+   585→    constructor() {
+   586→        // Synthesize all the byte blobs up front.
+   587→        this.modelBytes.set(TD_MODEL_ID, synthesizeOsrsModelBlob());
+   588→        this.modelBytes.set(TD_HEAD_MODEL_ID, synthesizeOsrsModelBlob());
+   589→        this.baseBytes.set(TD_BASE_ID, synthesizeOsrsAnimBaseBlob());
+   590→        this.animBytes.set(TD_ANIM_STAND_ID, synthesizeOsrsAnimFrameBlob(TD_BASE_ID, 10, 20, 30, 5));
+   591→        this.animBytes.set(TD_ANIM_ATTACK_ID, synthesizeOsrsAnimFrameBlob(TD_BASE_ID, 0, 0, 0, 0));
+   592→        this.seqBytes.set(TD_SEQ_STAND_ID, synthesizeOsrsSeqBlob(TD_ANIM_STAND_ID, 'td_stand'));
+   593→        this.seqBytes.set(TD_SEQ_ATTACK_ID, synthesizeOsrsSeqBlob(TD_ANIM_ATTACK_ID, 'td_attack'));
+   594→        this.npcBytes.set(TD_NPC_ID, synthesizeOsrsNpcBlob());
+   595→
+   596→        // Pre-load the AnimBase into the shared registry so OsrsAnimFrame.decode
+   597→        // can find it (mirroring what OsrsCacheAssetReader.readAnimBase does).
+   598→        this.loadAnimBase(TD_BASE_ID);
+   599→    }
+   600→
+   601→    // ---- CacheReader implementation ----
+   602→
+   603→    readModel(id: number): OsrsModel | null {
+   604→        const bytes = this.modelBytes.get(id);
+   605→        if (!bytes) {
+   606→            return null;
+   607→        }
+   608→        return OsrsModel.decode(id, bytes);
+   609→    }
+   610→
+   611→    readAnim(id: number): OsrsAnimFrame | null {
+   612→        const bytes = this.animBytes.get(id);
+   613→        if (!bytes || bytes.length < 2) {
+   614→            return null;
+   615→        }
+   616→        // Peek the trailing 2-byte base ID (same logic as OsrsCacheAssetReader.readAnim).
+   617→        const trailer = new Packet(bytes);
+   618→        trailer.pos = bytes.length - 2;
+   619→        const baseId = trailer.g2();
+   620→        if (!AnimBase.instances[baseId]) {
+   621→            this.loadAnimBase(baseId);
+   622→        }
+   623→        return OsrsAnimFrame.decode(bytes, baseId);
+   624→    }
+   625→
+   626→    readAnimBase(id: number): AnimBase | null {
+   627→        if (AnimBase.instances[id]) {
+   628→            return AnimBase.instances[id];
+   629→        }
+   630→        return this.loadAnimBase(id);
+   631→    }
+   632→
+   633→    readSeq(id: number): OsrsSeqType | null {
+   634→        if (!this.seqParsed) {
+   635→            this.parseSeqConfigs();
+   636→            this.seqParsed = true;
+   637→        }
+   638→        return OsrsSeqType.configs[id] ?? null;
+   639→    }
+   640→
+   641→    readNpc(id: number): OsrsNpcType | null {
+   642→        if (!this.npcParsed) {
+   643→            this.parseNpcConfigs();
+   644→            this.npcParsed = true;
+   645→        }
+   646→        return OsrsNpcType.configs[id] ?? null;
+   647→    }
+   648→
+   649→    readObj(_id: number): ObjType | null {
+   650→        // OSRS obj configs use opcodes the legacy ObjType decoder doesn't know
+   651→        // (and OsrsObjType isn't ported yet). Mirroring OsrsCacheAssetReader's
+   652→        // stub behavior — return null so the dep tracer records the obj as a
+   653→        // missing leaf. The Tormented Demon's `fire_shield` obj ref (discovered
+   654→        // via the script scanner) will be recorded as missing here too.
+   655→        return null;
+   656→    }
+   657→
+   658→    readParam(id: number): ParamType | null {
+   659→        // The fixture's TD NPC has 2 params (1234=attack_anim, 1235=death_anim),
+   660→        // both seq-typed. We synthesize a stub ParamType with type=SEQ so the
+   661→        // dep tracer's `walkParams` walks the param VALUE (seq 9502) as a seq
+   662→        // ref — exercising the param-value-walk code path.
+   663→        //
+   664→        // This mirrors what a real OSRS cache would provide via the (not-yet-
+   665→        // ported) OsrsParamType. Without this stub, the tracer would log a
+   666→        // "param type unknown" note and NOT walk the value — meaning the
+   667→        // seq:9502 → anim:2006 path wouldn't be reached via params.
+   668→        if (id === TD_PARAM_ATTACK_ANIM || id === TD_PARAM_DEATH_ANIM) {
+   669→            const stub = new ParamType(id);
+   670→            stub.type = ScriptVarType.SEQ;  // 65 — 'seq'
+   671→            stub.debugname = id === TD_PARAM_ATTACK_ANIM ? 'attack_anim' : 'death_anim';
+   672→            return stub;
+   673→        }
+   674→        // Other param IDs — return null (mirrors OsrsCacheAssetReader behavior).
+   675→        return null;
+   676→    }
+   677→
+   678→    readStruct(_id: number): StructType | null {
+   679→        return null;
+   680→    }
+   681→
+   682→    readTexture(_id: number): Uint8Array | null {
+   683→        return null;
+   684→    }
+   685→
+   686→    readParticle(_id: number): Uint8Array | null {
+   687→        return null;
+   688→    }
+   689→
+   690→    readSound(_id: number): Uint8Array | null {
+   691→        return null;
+   692→    }
+   693→
+   694→    getName(kind: NodeKind, id: number | string): string | null {
+   695→        if (typeof id === 'string') {
+   696→            return id;  // scripts use debugname-as-id
+   697→        }
+   698→        switch (kind) {
+   699→            case 'npc': {
+   700→                const npc = OsrsNpcType.configs[id];
+   701→                return npc?.debugname ?? npc?.name ?? null;
+   702→            }
+   703→            case 'seq': {
+   704→                const seq = OsrsSeqType.configs[id];
+   705→                return seq?.debugname ?? null;
+   706→            }
+   707→            default:
+   708→                return null;
+   709→        }
+   710→    }
+   711→
+   712→    // ---- Internal helpers (mirror OsrsCacheAssetReader's parsing flow) ----
+   713→
+   714→    /**
+   715→     * Parse the synthesized NPC config bytes and populate
+   716→     * `OsrsNpcType.configs[]` + `OsrsNpcType.configNames`.
+   717→     *
+   718→     * Mirrors `OsrsCacheAssetReader.parseNpcConfigs()`.
+   719→     */
+   720→    private parseNpcConfigs(): void {
+   721→        OsrsNpcType.configNames = new Map();
+   722→        OsrsNpcType.configs = [];
+   723→
+   724→        for (const [id, bytes] of this.npcBytes) {
+   725→            const packet = new Packet(bytes);
+   726→            const config = new OsrsNpcType(id);
+   727→            try {
+   728→                config.decodeType(packet);
+   729→                config.postDecode();
+   730→            } catch (err) {
+   731→                printWarning(`TormentedDemonStubReader: npc ${id} decode failed: ${(err as Error).message}`);
+   732→            }
+   733→            OsrsNpcType.configs[id] = config;
+   734→            if (config.debugname) {
+   735→                OsrsNpcType.configNames.set(config.debugname, id);
+   736→            }
+   737→        }
+   738→    }
+   739→
+   740→    /**
+   741→     * Parse the synthesized seq config bytes and populate
+   742→     * `OsrsSeqType.configs[]` + `OsrsSeqType.configNames`.
+   743→     *
+   744→     * Mirrors `OsrsCacheAssetReader.parseSeqConfigs()`.
+   745→     */
+   746→    private parseSeqConfigs(): void {
+   747→        OsrsSeqType.configNames = new Map();
+   748→        OsrsSeqType.configs = [];
+   749→
+   750→        for (const [id, bytes] of this.seqBytes) {
+   751→            const packet = new Packet(bytes);
+   752→            const config = new OsrsSeqType(id);
+   753→            try {
+   754→                config.decodeType(packet);
+   755→                config.postDecode();
+   756→            } catch (err) {
+   757→                printWarning(`TormentedDemonStubReader: seq ${id} decode failed: ${(err as Error).message}`);
+   758→            }
+   759→            OsrsSeqType.configs[id] = config;
+   760→            if (config.debugname) {
+   761→                OsrsSeqType.configNames.set(config.debugname, id);
+   762→            }
+   763→        }
+   764→    }
+   765→
+   766→    /**
+   767→     * Load + parse a synthesized AnimBase and register it in
+   768→     * `AnimBase.instances[id]`. Mirrors
+   769→     * `OsrsCacheAssetReader.loadAnimBase()`.
+   770→     */
+   771→    private loadAnimBase(id: number): AnimBase | null {
+   772→        const bytes = this.baseBytes.get(id);
+   773→        if (!bytes || bytes.length < 1) {
+   774→            return null;
+   775→        }
+   776→        const packet = new Packet(bytes);
+   777→        const length = packet.g1();
+   778→        const types = new Int32Array(length);
+   779→        const labels: Int32Array[] = new Array(length);
+   780→        for (let i = 0; i < length; i++) {
+   781→            types[i] = packet.g1();
+   782→        }
+   783→        for (let i = 0; i < length; i++) {
+   784→            const labelCount = packet.g1();
+   785→            const labelArr = new Int32Array(labelCount);
+   786→            for (let j = 0; j < labelCount; j++) {
+   787→                labelArr[j] = packet.g1();
+   788→            }
+   789→            labels[i] = labelArr;
+   790→        }
+   791→        const base = new AnimBase();
+   792→        base.length = length;
+   793→        base.types = types;
+   794→        base.labels = labels;
+   795→        AnimBase.instances[id] = base;
+   796→        return base;
+   797→    }
+   798→}
+   799→
+   800→// ---- Fake combat script content ----
+   801→
+   802→/**
+   803→ * The placeholder runescript content for the Tormented Demon's combat script.
+   804→ *
+   805→ * This is intentionally a stub — the real TD combat script is a complex
+   806→ * runescript that drives the demon's AI behavior (the fire shield mechanic,
+   807→ * the magic fireball attack, etc.). For the pilot, we just need:
+   808→ *
+   809→ *   1. A `[ai_applayer2,Tormented demon]` dispatch directive so the dep
+   810→ *      tracer's `findScriptsForNpc()` finds this file (it scans for
+   811→ *      `[<trigger>,<npcName>]` patterns where `npcName` is the NPC's
+   812→ *      display name).
+   813→ *
+   814→ *   2. An `inv_has(worn, fire_shield)` call site so the script scanner
+   815→ *      discovers the `fire_shield` obj ref and records it as a missing
+   816→ *      dep (proving the tracer walks the script → obj edge — which is
+   817→ *      the goal per the user's brief: "the TD combat script probably
+   818→ *      needs the fire shield for the demon").
+   819→ *
+   820→ *   3. A `npc_anim(td_attack, 0)` call site so the scanner also discovers
+   821→ *      the `td_attack` seq ref (the script references the seq by name).
+   822→ *
+   823→ *   4. A `[npc_assoc]` block declaring which NPC this script belongs to
+   824→ *      (LostCity convention; doesn't affect the dep tracer but documents
+   825→ *      intent).
+   826→ *
+   827→ *   5. An `[obj_assoc]` block declaring the fire shield dependency
+   828→ *      (LostCity convention; doesn't affect the dep tracer but documents
+   829→ *      intent).
+   830→ */
+   831→const TD_COMBAT_SCRIPT = `// Tormented Demon combat script (synthesized stub for the OSRS pipeline pilot).
+   832→//
+   833→// This is a PLACEHOLDER — the real TD combat script is a complex runescript
+   834→// driving the demon's AI: the fire shield mechanic, the magic fireball
+   835→// attack, melee swipe, defend stance, and death animation. For the pilot we
+   836→// only need enough content for the dep tracer to discover the fire_shield
+   837→// obj dependency via the script scanner.
+   838→
+   839→[npc_assoc]
+   840→tormented_demon
+   841→
+   842→[obj_assoc]
+   843→fire_shield
+   844→
+   845→[ai_applayer2,Tormented demon]
+   846→// Combat AI: check if the player is wearing a fire shield (anti-dragon-breath
+   847→// shield). If not, the demon's fireball attack hits harder.
+   848→if (inv_has(worn, fire_shield)) {
+   849→    npc_anim(td_attack, 0);
+   850→    sound_synth(td_fireball, 0, 30);
+   851→} else {
+   852→    npc_anim(td_attack, 0);
+   853→    sound_synth(td_fireball, 0, 60);
+   854→}
+   855→`;
+   856→
+   857→// ---- Fixture generator ----
+   858→
+   859→/**
+   860→ * Generate the Tormented Demon test fixture.
+   861→ *
+   862→ * Writes a temp directory under `os.tmpdir()` containing:
+   863→ *   - `<cacheDir>/scripts/npc/scripts/tormented_demon.rs2` — fake combat script.
+   864→ *
+   865→ * Returns the path + the OSRS NPC ID + the expected dep count. The caller
+   866→ * is expected to:
+   867→ *   1. Construct a `TormentedDemonStubReader` (which synthesizes the OSRS
+   868→ *      bytes in-memory — no disk I/O for the bytes themselves).
+   869→ *   2. Construct a `DependencyTracer` with `scriptDir = <cacheDir>/scripts/npc/scripts`.
+   870→ *   3. Call `tracer.trace(fixture.npcId)` to produce the DepsMap.
+   871→ *
+   872→ * Cleanup: the caller is responsible for deleting `cacheDir` when done
+   873→ * (the pilot script does this on exit unless `--keep-fixture` is passed).
+   874→ */
+   875→export function generateTormentedDemonFixture(): TormentedDemonFixture {
+   876→    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'osrs-td-fixture-'));
+   877→    printInfo(`TormentedDemonFixture: created temp dir ${cacheDir}`);
+   878→
+   879→    // Write the fake combat script.
+   880→    const scriptDir = path.join(cacheDir, 'scripts', 'npc', 'scripts');
+   881→    const scriptPath = path.join(scriptDir, 'tormented_demon.rs2');
+   882→    fs.mkdirSync(scriptDir, { recursive: true });
+   883→    fs.writeFileSync(scriptPath, TD_COMBAT_SCRIPT, 'utf8');
+   884→    printInfo(`TormentedDemonFixture: wrote combat script to ${scriptPath}`);
+   885→
+   886→    return {
+   887→        cacheDir,
+   888→        npcId: TD_NPC_ID,
+   889→        expectedDeps: EXPECTED_DEP_NODES,
+   890→        scriptPath,
+   891→        scriptDir
+   892→    };
+   893→}
+   894→
+   895→/**
+   896→ * Remove the fixture's temp directory. Best-effort — failures are logged
+   897→ * but not thrown (the pilot may want to continue even if cleanup fails).
+   898→ *
+   899→ * Idempotent: calling this twice is safe.
+   900→ */
+   901→export function cleanupFixture(fixture: TormentedDemonFixture): void {
+   902→    try {
+   903→        fs.rmSync(fixture.cacheDir, { recursive: true, force: true });
+   904→        printInfo(`TormentedDemonFixture: cleaned up ${fixture.cacheDir}`);
+   905→    } catch (err) {
+   906→        printWarning(`TormentedDemonFixture: failed to clean up ${fixture.cacheDir}: ${(err as Error).message}`);
+   907→    }
+   908→}
+   909→

@@ -1,0 +1,901 @@
+     1→/**
+     2→ * VariantRegistry — the core singleton of the modular NPC model variant
+     3→ * system (Task 9 of the OSRS → 377 model pipeline).
+     4→ *
+     5→ * ----------------------------------------------------------------------------
+     6→ * Integration pattern with the existing NpcType code path
+     7→ * ----------------------------------------------------------------------------
+     8→ *
+     9→ * The variant registry is NOT a wrapper around `NpcType`. It's a
+    10→ * side-channel: when an NPC is being spawned for a specific player, the
+    11→ * spawn code calls `VariantRegistry.resolveNpcVariant(npcId, playerId)`
+    12→ * to decide which config ID to use. The two paths are:
+    13→ *
+    14→ *   - `'legacy377'` → use the existing `NpcType.get(npcId)` path UNCHANGED.
+    15→ *                     This is the default for every NPC that hasn't been
+    16→ *                     imported, and for every player whose era preset is
+    17→ *                     `'05era'` (the server default).
+    18→ *
+    19→ *   - `'osrs'`       → use `NpcType.get(osrsImportedNpcId)` — the
+    20→ *                     imported NPC's new 377 pack-file ID, registered in
+    21→ *                     `content/pack/npc.pack` by Task 8's writer and
+    22→ *                     indexed in `content/deps/variants.json` by this
+    23→ *                     registry. The imported NPC config has its own
+    24→ *                     `models[]` array pointing at the OSRS-imported
+    25→ *                     models' new 377 IDs — so no per-model swap is
+    26→ *                     needed at the spawn site.
+    27→ *
+    28→ * To keep this opt-in and non-invasive, the registry exposes a single
+    29→ * helper that does the lookup:
+    30→ *
+    31→ *   `VariantRegistry.getInstance().resolveNpcConfigForPlayer(npcId, playerId)`
+    32→ *
+    33→ * This returns a `NpcType` instance — either the legacy one (the
+    34→ * existing `NpcType.get(npcId)`) or the OSRS-imported one
+    35→ * (`NpcType.get(osrsImportedNpcId)`). Future engine work can migrate
+    36→ * NPC spawn sites one at a time to call this helper instead of
+    37→ * `NpcType.get(npcId)` directly. Until a spawn site is migrated, the
+    38→ * existing `NpcType.get(npcId)` path continues to work unchanged —
+    39→ * the variant system is invisible to it.
+    40→ *
+    41→ * The registry does NOT modify `NpcType.configs[]` or any other
+    42→ * existing static registry. It only consults them (for the
+    43→ * `legacyModelOwner` reverse index used by `resolveModelVariant`).
+    44→ *
+    45→ * ----------------------------------------------------------------------------
+    46→ * variants.json schema
+    47→ * ----------------------------------------------------------------------------
+    48→ *
+    49→ *   {
+    50→ *     "version": 1,
+    51→ *     "variants": [
+    52→ *       {
+    53→ *         "legacyNpcId":     number,   // -1 if brand-new OSRS NPC (no legacy twin)
+    54→ *         "osrsNpcId":       number,   // the new 377 pack-file ID assigned by Task 8
+    55→ *         "osrsDebugname":   string,   // sanitized debugname (with `osrs_` prefix)
+    56→ *         "legacyDebugname": string | null,  // null if legacyNpcId === -1
+    57→ *         "depMapPath":      string,   // relative path: content/deps/<name>.deps.json
+    58→ *         "importedAt":      string    // ISO timestamp
+    59→ *       },
+    60→ *       ...
+    61→ *     ]
+    62→ *   }
+    63→ *
+    64→ * Generated/updated by `VariantRegistry.registerVariant()` and by the
+    65→ * standalone `engine/tools/osrs/UpdateVariantsIndex.ts` script (which
+    66→ * regenerates the file from all `content/deps/*.deps.json` files).
+    67→ *
+    68→ * ----------------------------------------------------------------------------
+    69→ * Per-player state caching
+    70→ * ----------------------------------------------------------------------------
+    71→ *
+    72→ * `resolveNpcVariant(npcId, playerId)` is SYNC (the spawn path is hot).
+    73→ * The per-player `PlayerVariantState` is loaded asynchronously by
+    74→ * `VariantPersistence.loadPlayerVariantState(playerId)` at login time
+    75→ * and stashed in this registry's `playerStateCache` Map. The login
+    76→ * handler is expected to call:
+    77→ *
+    78→ *   const state = await loadPlayerVariantState(playerId);
+    79→ *   VariantRegistry.getInstance().setPlayerState(playerId, state);
+    80→ *
+    81→ * On logout, call `VariantRegistry.getInstance().clearPlayerState(playerId)`.
+    82→ *
+    83→ * If `resolveNpcVariant` is called for a playerId that's not in the
+    84→ * cache (e.g. before the login handler has warmed it), the registry
+    85→ * returns the server default (`'legacy377'` for everything with a
+    86→ * legacy twin, `'osrs'` for brand-new OSRS NPCs). A warning is logged
+    87→ * so the developer knows the cache wasn't warmed — but the engine
+    88→ * doesn't crash.
+    89→ */
+    90→
+    91→import fs from 'fs';
+    92→import path from 'path';
+    93→
+    94→import NpcType from '#/cache/config/NpcType.js';
+    95→import { printDebug, printInfo, printWarning } from '#/util/Logger.js';
+    96→import Environment from '#/util/Environment.js';
+    97→
+    98→import type { DepsMap, NodeKind } from '#tools/osrs/DepsSchema.js';
+    99→import { nodeKey } from '#tools/osrs/DepsSchema.js';
+   100→
+   101→import type { NpcVariant } from './PlayerVariantState.js';
+   102→import { PlayerVariantState } from './PlayerVariantState.js';
+   103→import {
+   104→    resolveNpcVariant as resolveNpcVariantPure,
+   105→    type VariantAvailabilitySource
+   106→} from './VariantResolver.js';
+   107→
+   108→/**
+   109→ * Metadata for a single variant pair (legacy NPC ↔ OSRS-imported NPC).
+   110→ * Returned by `VariantRegistry.getVariantMetadata(npcId)` for the UI.
+   111→ */
+   112→export interface VariantMetadata {
+   113→    /** Legacy 377 NPC ID, or -1 if this is a brand-new OSRS NPC. */
+   114→    legacyNpcId: number;
+   115→    /** New 377 pack-file ID assigned to the OSRS-imported NPC by Task 8. */
+   116→    osrsNpcId: number;
+   117→    /** Sanitized debugname of the OSRS-imported NPC (with `osrs_` prefix). */
+   118→    osrsDebugname: string;
+   119→    /** Debugname of the legacy 377 NPC, or null if `legacyNpcId === -1`. */
+   120→    legacyDebugname: string | null;
+   121→    /**
+   122→     * Which side this metadata was looked up FROM.
+   123→     * - `'legacy377'` : the caller passed `legacyNpcId`.
+   124→     * - `'osrs'`       : the caller passed `osrsNpcId`.
+   125→     * Used by the UI to know which "side" of the variant pair the
+   126→     * current NPC ID represents.
+   127→     */
+   128→    source: 'legacy377' | 'osrs';
+   129→    /** ISO timestamp of when the variant was registered. */
+   130→    importedAt: string;
+   131→    /** Relative path to the deps.json file (e.g. `content/deps/<name>.deps.json`). */
+   132→    depMapPath: string;
+   133→}
+   134→
+   135→/**
+   136→ * On-disk shape of a single entry in `content/deps/variants.json`.
+   137→ * Matches the schema documented in the file-level docstring.
+   138→ */
+   139→interface VariantEntry {
+   140→    legacyNpcId: number;
+   141→    osrsNpcId: number;
+   142→    osrsDebugname: string;
+   143→    legacyDebugname: string | null;
+   144→    depMapPath: string;
+   145→    importedAt: string;
+   146→}
+   147→
+   148→/**
+   149→ * On-disk shape of `content/deps/variants.json`.
+   150→ */
+   151→interface VariantsFile {
+   152→    version: 1;
+   153→    variants: VariantEntry[];
+   154→}
+   155→
+   156→/** Schema version of the variants.json file. Bump on breaking changes. */
+   157→const VARIANTS_SCHEMA_VERSION = 1 as const;
+   158→
+   159→/**
+   160→ * Default filename for the variants index, relative to the content dir.
+   161→ */
+   162→const DEFAULT_VARIANTS_REL_PATH = 'deps/variants.json';
+   163→
+   164→/**
+   165→ * Default location of the variants index file (absolute).
+   166→ * Resolved from `Environment.BUILD_SRC_DIR` (defaults to `../content`)
+   167→ * + `deps/variants.json`.
+   168→ */
+   169→const DEFAULT_VARIANTS_PATH = path.resolve(
+   170→    Environment.BUILD_SRC_DIR,
+   171→    DEFAULT_VARIANTS_REL_PATH
+   172→);
+   173→
+   174→/**
+   175→ * The VariantRegistry singleton.
+   176→ *
+   177→ * Constructed lazily on first `getInstance()` call. The static `load()`
+   178→ * method must be called at engine startup (after `NpcType.load()`) to
+   179→ * populate the variant index from `content/deps/variants.json`.
+   180→ */
+   181→export class VariantRegistry implements VariantAvailabilitySource {
+   182→    private static instance: VariantRegistry | null = null;
+   183→
+   184→    /**
+   185→     * Absolute path to the variants.json index file. Set by `load()` or
+   186→     * defaulted to `DEFAULT_VARIANTS_PATH`.
+   187→     */
+   188→    private variantsPath: string = DEFAULT_VARIANTS_PATH;
+   189→
+   190→    /**
+   191→     * All variant entries, in insertion order (matches variants.json).
+   192→     * The canonical source of truth — every lookup index below is
+   193→     * derived from this list.
+   194→     */
+   195→    private entries: VariantEntry[] = [];
+   196→
+   197→    /**
+   198→     * Lookup: `legacyNpcId` → entry (for NPCs that have a legacy twin).
+   199→     * Skips entries with `legacyNpcId === -1`.
+   200→     */
+   201→    private byLegacyNpc: Map<number, VariantEntry> = new Map();
+   202→
+   203→    /**
+   204→     * Lookup: `osrsNpcId` → entry (for ALL entries, including
+   205→     * brand-new OSRS NPCs with `legacyNpcId === -1`).
+   206→     */
+   207→    private byOsrsNpc: Map<number, VariantEntry> = new Map();
+   208→
+   209→    /**
+   210→     * Reverse index: legacy 377 model ID → legacy 377 NPC ID that owns
+   211→     * it. Built lazily on first call to `resolveModelVariant` by
+   212→     * walking `NpcType.configs[]` and indexing `models[]`.
+   213→     *
+   214→     * Note: if a model is owned by multiple NPCs (e.g. a shared shield
+   215→     * model), the FIRST NPC encountered (lowest ID) wins. This is the
+   216→     * documented limitation — callers that need disambiguation should
+   217→     * use `resolveNpcConfigForPlayer` instead.
+   218→     */
+   219→    private legacyModelOwner: Map<number, number> | null = null;
+   220→
+   221→    /**
+   222→     * Per-player state cache. Warmed by the login handler via
+   223→     * `setPlayerState(playerId, state)`. Cleared by the logout handler
+   224→     * via `clearPlayerState(playerId)`.
+   225→     */
+   226→    private playerStateCache: Map<number, PlayerVariantState> = new Map();
+   227→
+   228→    /**
+   229→     * Deps-map cache: `absolutePath` → `DepsMap | null`. Loaded lazily
+   230→     * by `resolveModelVariant` and `registerVariant`. Null entries mean
+   231→     * "tried to load, file missing or unparseable" (don't retry).
+   232→     */
+   233→    private depMapCache: Map<string, DepsMap | null> = new Map();
+   234→
+   235→    /**
+   236→     * Private constructor — use `VariantRegistry.getInstance()`.
+   237→     */
+   238→    private constructor() {
+   239→        // No I/O in the constructor. `load()` does the file reads.
+   240→    }
+   241→
+   242→    /**
+   243→     * Get the singleton instance. The instance exists even before
+   244→     * `load()` is called — but its variant index will be empty, so
+   245→     * every `resolveNpcVariant` call will return the server default.
+   246→     */
+   247→    static getInstance(): VariantRegistry {
+   248→        if (!VariantRegistry.instance) {
+   249→            VariantRegistry.instance = new VariantRegistry();
+   250→        }
+   251→        return VariantRegistry.instance;
+   252→    }
+   253→
+   254→    /**
+   255→     * Load the variants.json index from disk. Called at engine startup
+   256→     * after `NpcType.load()` (the legacy `legacyModelOwner` reverse
+   257→     * index depends on NpcType being loaded).
+   258→     *
+   259→     * Safe to call multiple times — each call replaces the in-memory
+   260→     * index. The per-player state cache is NOT cleared (those reflect
+   261→     * logged-in players, not the variant index).
+   262→     *
+   263→     * If the file doesn't exist, the registry starts empty (every NPC
+   264→     * resolves to `'legacy377'`). This is the expected state before
+   265→     * any OSRS imports have been done.
+   266→     *
+   267→     * @param variantsPath  optional absolute path to the variants.json
+   268→     *                      file. Defaults to
+   269→     *                      `${Environment.BUILD_SRC_DIR}/deps/variants.json`.
+   270→     */
+   271→    static load(variantsPath?: string): void {
+   272→        const instance = VariantRegistry.getInstance();
+   273→        if (variantsPath) {
+   274→            instance.variantsPath = variantsPath;
+   275→        }
+   276→        instance.reloadFromDisk();
+   277→    }
+   278→
+   279→    /**
+   280→     * Reload the variant index from `this.variantsPath`. Logs a debug
+   281→     * message on success and a warning on missing/malformed file.
+   282→     */
+   283→    private reloadFromDisk(): void {
+   284→        this.entries = [];
+   285→        this.byLegacyNpc.clear();
+   286→        this.byOsrsNpc.clear();
+   287→        // Don't clear `legacyModelOwner` — it's keyed by NpcType, not
+   288→        // by variants.json. It will be rebuilt lazily if needed.
+   289→        // Don't clear `depMapCache` — it's keyed by absolute path; the
+   290→        // files haven't changed just because we re-read variants.json.
+   291→        // Don't clear `playerStateCache` — those are live players.
+   292→
+   293→        if (!fs.existsSync(this.variantsPath)) {
+   294→            printDebug(`VariantRegistry: no variants.json at ${this.variantsPath} — running with empty index (legacy377 for all NPCs)`);
+   295→            return;
+   296→        }
+   297→
+   298→        let raw: string;
+   299→        try {
+   300→            raw = fs.readFileSync(this.variantsPath, 'utf8');
+   301→        } catch (err) {
+   302→            printWarning(`VariantRegistry: failed to read ${this.variantsPath}: ${(err as Error).message}`);
+   303→            return;
+   304→        }
+   305→
+   306→        let parsed: VariantsFile;
+   307→        try {
+   308→            parsed = JSON.parse(raw) as VariantsFile;
+   309→        } catch (err) {
+   310→            printWarning(`VariantRegistry: failed to parse ${this.variantsPath}: ${(err as Error).message}`);
+   311→            return;
+   312→        }
+   313→
+   314→        if (parsed.version !== VARIANTS_SCHEMA_VERSION) {
+   315→            printWarning(`VariantRegistry: variants.json version ${parsed.version} does not match expected ${VARIANTS_SCHEMA_VERSION} — index ignored`);
+   316→            return;
+   317→        }
+   318→
+   319→        if (!Array.isArray(parsed.variants)) {
+   320→            printWarning('VariantRegistry: variants.json \'variants\' field is not an array — index ignored');
+   321→            return;
+   322→        }
+   323→
+   324→        for (const entry of parsed.variants) {
+   325→            this.addEntryInternal(entry);
+   326→        }
+   327→
+   328→        printInfo(`VariantRegistry: loaded ${this.entries.length} variant(s) from ${this.variantsPath}`);
+   329→    }
+   330→
+   331→    /**
+   332→     * Internal: register a variant entry in all the in-memory indexes.
+   333→     * Used by `reloadFromDisk()` and `registerVariant()`.
+   334→     *
+   335→     * If an entry already exists with the same `legacyNpcId` (when
+   336→     * !== -1) OR the same `osrsNpcId`, it is REPLACED (last write wins).
+   337→     * This is intentional — re-importing an NPC after a sanitization
+   338→     * rule change should update the existing entry, not add a
+   339→     * duplicate.
+   340→     */
+   341→    private addEntryInternal(entry: VariantEntry): void {
+   342→        // Replace any existing entry with the same legacyNpcId.
+   343→        if (entry.legacyNpcId !== -1) {
+   344→            const existing = this.byLegacyNpc.get(entry.legacyNpcId);
+   345→            if (existing) {
+   346→                const idx = this.entries.indexOf(existing);
+   347→                if (idx !== -1) {
+   348→                    this.entries.splice(idx, 1);
+   349→                }
+   350→            }
+   351→            this.byLegacyNpc.set(entry.legacyNpcId, entry);
+   352→        }
+   353→        // Replace any existing entry with the same osrsNpcId.
+   354→        {
+   355→            const existing = this.byOsrsNpc.get(entry.osrsNpcId);
+   356→            if (existing && existing !== this.byLegacyNpc.get(entry.legacyNpcId)) {
+   357→                const idx = this.entries.indexOf(existing);
+   358→                if (idx !== -1) {
+   359→                    this.entries.splice(idx, 1);
+   360→                }
+   361→            }
+   362→            this.byOsrsNpc.set(entry.osrsNpcId, entry);
+   363→        }
+   364→        this.entries.push(entry);
+   365→    }
+   366→
+   367→    // ---- Public: per-player state cache ----
+   368→
+   369→    /**
+   370→     * Stash a player's variant state in the cache. Called by the login
+   371→     * handler after `VariantPersistence.loadPlayerVariantState(playerId)`.
+   372→     */
+   373→    setPlayerState(playerId: number, state: PlayerVariantState): void {
+   374→        this.playerStateCache.set(playerId, state);
+   375→    }
+   376→
+   377→    /**
+   378→     * Get a player's cached variant state, or null if not warmed.
+   379→     * Callers that NEED a state should use `loadPlayerVariantState`
+   380→     * (async) at login time and stash it via `setPlayerState`.
+   381→     */
+   382→    getPlayerState(playerId: number): PlayerVariantState | null {
+   383→        return this.playerStateCache.get(playerId) ?? null;
+   384→    }
+   385→
+   386→    /**
+   387→     * Drop a player's cached state. Called by the logout handler.
+   388→     * Defensive: no-op if the playerId isn't cached.
+   389→     */
+   390→    clearPlayerState(playerId: number): void {
+   391→        this.playerStateCache.delete(playerId);
+   392→    }
+   393→
+   394→    // ---- Public: variant resolution ----
+   395→
+   396→    /**
+   397→     * The main entry point. Resolves which variant a player should see
+   398→     * for a given NPC.
+   399→     *
+   400→     * @param npcId     the legacy 377 NPC ID (or, for brand-new OSRS
+   401→     *                  NPCs with no legacy twin, the osrsImportedNpcId).
+   402→     * @param playerId  the account ID of the player viewing the NPC.
+   403→     * @returns         `'legacy377'` or `'osrs'`.
+   404→     *
+   405→     * Walks the resolution order (see `VariantResolver.ts`):
+   406→     *   1. Per-NPC player override
+   407→     *   2. Per-region player override (stubbed — regionId always -1)
+   408→     *   3. Player era preset
+   409→     *   4. Server default (`'05era'` → `'legacy377'`)
+   410→     *
+   411→     * If the player's state isn't in the cache (login handler didn't
+   412→     * warm it), returns the server default and logs a warning.
+   413→     */
+   414→    resolveNpcVariant(npcId: number, playerId: number): NpcVariant {
+   415→        const state = this.playerStateCache.get(playerId);
+   416→        if (!state) {
+   417→            // Cache miss — return the server default. The server
+   418→            // default is `'05era'`, which resolves to `'legacy377'`
+   419→            // (or `'osrs'` for brand-new OSRS NPCs with no legacy
+   420→            // twin). Use a temporary default state to compute this.
+   421→            const defaultState = new PlayerVariantState(playerId);
+   422→            const resolved = resolveNpcVariantPure(defaultState, npcId, -1, this);
+   423→            // Warn (rate-limited in a real engine; here we just warn).
+   424→            printWarning(`VariantRegistry: player ${playerId} state not cached — returning server default '${resolved}' for npc ${npcId}`);
+   425→            return resolved;
+   426→        }
+   427→        return resolveNpcVariantPure(state, npcId, -1, this);
+   428→    }
+   429→
+   430→    /**
+   431→     * Variant of `resolveNpcVariant` that takes an explicit region ID
+   432→     * (used by future spawn-site migrations that pass the player's
+   433→     * current region). Today the per-region override layer is stubbed
+   434→     * — the registry always passes regionId = -1 in
+   435→     * `resolveNpcVariant`. This method exists so the spawn-site
+   436→     * migration is a one-line change.
+   437→     */
+   438→    resolveNpcVariantForRegion(npcId: number, playerId: number, regionId: number): NpcVariant {
+   439→        const state = this.playerStateCache.get(playerId);
+   440→        if (!state) {
+   441→            const defaultState = new PlayerVariantState(playerId);
+   442→            const resolved = resolveNpcVariantPure(defaultState, npcId, -1, this);
+   443→            printWarning(`VariantRegistry: player ${playerId} state not cached — returning server default '${resolved}' for npc ${npcId}`);
+   444→            return resolved;
+   445→        }
+   446→        return resolveNpcVariantPure(state, npcId, regionId, this);
+   447→    }
+   448→
+   449→    /**
+   450→     * Resolve which 377 model ID to serve for a given legacy model ID.
+   451→     *
+   452→     * Walks the dep map backwards:
+   453→     *   1. legacy model ID → owning legacy NPC (via reverse index of
+   454→     *      `NpcType.configs[].models[]`);
+   455→     *   2. owning legacy NPC → player's variant choice (via
+   456→     *      `resolveNpcVariant`);
+   457→     *   3. if `'osrs'`, look up the OSRS-imported model's new 377 ID
+   458→     *      via the dep map of the variant's OSRS NPC.
+   459→     *
+   460→     * Limitation: this uses a parallel-array heuristic — if the legacy
+   461→     * NPC has N models and the OSRS NPC has N models, they're paired
+   462→     * by index. If the counts differ, NO per-model swap is done (the
+   463→     * legacy model ID is returned unchanged) — the caller should use
+   464→     * `resolveNpcConfigForPlayer` instead, which swaps the entire NPC
+   465→     * config (and thus the entire `models[]` array).
+   466→     *
+   467→     * For brand-new OSRS NPCs (no legacy twin), this method returns
+   468→     * the input model ID unchanged — the engine never calls it with a
+   469→     * brand-new OSRS model ID, because brand-new OSRS models are only
+   470→     * referenced by their new 377 IDs (via the imported NPC config).
+   471→     *
+   472→     * @returns the legacy model ID (no swap), or the OSRS-imported
+   473→     *          model's new 377 ID (if swapped).
+   474→     */
+   475→    resolveModelVariant(modelId: number, playerId: number): number {
+   476→        // Step 1: find the owning legacy NPC.
+   477→        const owner = this.getLegacyModelOwner().get(modelId);
+   478→        if (owner === undefined) {
+   479→            // Not owned by any 377 NPC — leave as-is (likely already
+   480→            // an OSRS-imported model ID, or a head/icon model).
+   481→            return modelId;
+   482→        }
+   483→
+   484→        // Step 2: resolve the player's variant choice for that NPC.
+   485→        const variant = this.resolveNpcVariant(owner, playerId);
+   486→        if (variant !== 'osrs') {
+   487→            // Player is seeing the legacy NPC — leave the legacy model.
+   488→            return modelId;
+   489→        }
+   490→
+   491→        // Step 3: look up the OSRS-imported model's new 377 ID via
+   492→        // the dep map. We need the variant entry for this NPC.
+   493→        const entry = this.byLegacyNpc.get(owner);
+   494→        if (!entry) {
+   495→            // No variant registered — shouldn't happen (resolveNpcVariant
+   496→            // returned 'osrs', which means there IS an entry). Defensive.
+   497→            return modelId;
+   498→        }
+   499→
+   500→        // Look up the legacy NPC's models[] array.
+   501→        const legacyNpcType = NpcType.get(owner);
+   502→        if (!legacyNpcType || !legacyNpcType.models) {
+   503→            return modelId;
+   504→        }
+   505→        const legacyModels = legacyNpcType.models;
+   506→        const idx = legacyModels.indexOf(modelId);
+   507→        if (idx === -1) {
+   508→            return modelId;
+   509→        }
+   510→
+   511→        // Load the dep map and find the OSRS NPC's model refs.
+   512→        const depMap = this.loadDepMap(entry.depMapPath);
+   513→        if (!depMap) {
+   514→            return modelId;
+   515→        }
+   516→        // The dep map's root.id is the OSRS source cache NPC ID —
+   517→        // find the NPC node by that key.
+   518→        const npcNode = depMap.nodes[nodeKey('npc' as NodeKind, depMap.root.id)];
+   519→        if (!npcNode) {
+   520→            return modelId;
+   521→        }
+   522→        // Collect the model dep refs in order.
+   523→        const modelRefs = npcNode.deps.filter(d => d.kind === 'model');
+   524→        if (modelRefs.length === 0) {
+   525→            return modelId;
+   526→        }
+   527→        // Parallel-array heuristic: pair legacy model i with OSRS model i.
+   528→        if (modelRefs.length !== legacyModels.length) {
+   529→            // Count mismatch — don't swap (caller should use
+   530→            // resolveNpcConfigForPlayer instead).
+   531→            return modelId;
+   532→        }
+   533→        const osrsModelId = modelRefs[idx].id;
+   534→        if (typeof osrsModelId !== 'number') {
+   535→            return modelId;
+   536→        }
+   537→        const modelNode = depMap.nodes[nodeKey('model', osrsModelId)];
+   538→        if (!modelNode || modelNode.transformedFrom === null || modelNode.transformedFrom === undefined) {
+   539→            return modelId;
+   540→        }
+   541→        if (typeof modelNode.transformedFrom !== 'number') {
+   542→            return modelId;
+   543→        }
+   544→        return modelNode.transformedFrom;
+   545→    }
+   546→
+   547→    /**
+   548→     * Convenience helper for NPC spawn sites. Returns the `NpcType`
+   549→     * instance the player should see — either the legacy one
+   550→     * (`NpcType.get(npcId)`, the existing path UNCHANGED) or the
+   551→     * OSRS-imported one (`NpcType.get(osrsImportedNpcId)`).
+   552→     *
+   553→     * Future engine work can migrate spawn sites one at a time to
+   554→     * call this helper. Until a spawn site is migrated, the existing
+   555→     * `NpcType.get(npcId)` path continues to work — the variant
+   556→     * system is invisible to it.
+   557→     *
+   558→     * If the variant resolves to `'osrs'` but the imported NPC config
+   559→     * can't be found in `NpcType.configs[]` (e.g. the pack file is
+   560→     * out of sync with variants.json), this falls back to the legacy
+   561→     * NpcType and logs a warning. Never throws.
+   562→     */
+   563→    resolveNpcConfigForPlayer(npcId: number, playerId: number): NpcType {
+   564→        const variant = this.resolveNpcVariant(npcId, playerId);
+   565→        if (variant === 'legacy377') {
+   566→            return NpcType.get(npcId);
+   567→        }
+   568→        // 'osrs' — find the imported NPC's new 377 ID.
+   569→        // Look up by legacyNpcId first (the common case where the
+   570→        // caller passed the legacy ID).
+   571→        let entry = this.byLegacyNpc.get(npcId);
+   572→        if (!entry) {
+   573→            // Maybe the caller passed the osrsNpcId directly (brand-new
+   574→            // OSRS NPC with no legacy twin). Look it up.
+   575→            entry = this.byOsrsNpc.get(npcId);
+   576→        }
+   577→        if (!entry) {
+   578→            // No variant registered — shouldn't happen (resolveNpcVariant
+   579→            // returned 'osrs'). Fall back to legacy.
+   580→            printWarning(`VariantRegistry: resolveNpcVariant returned 'osrs' for npc ${npcId} but no variant entry found — falling back to legacy`);
+   581→            return NpcType.get(npcId);
+   582→        }
+   583→        const imported = NpcType.get(entry.osrsNpcId);
+   584→        if (!imported) {
+   585→            printWarning(`VariantRegistry: osrs-imported npc ${entry.osrsNpcId} ('${entry.osrsDebugname}') not loaded in NpcType.configs — falling back to legacy npc ${npcId}`);
+   586→            return NpcType.get(npcId);
+   587→        }
+   588→        return imported;
+   589→    }
+   590→
+   591→    // ---- Public: variant index queries ----
+   592→
+   593→    /**
+   594→     * Returns the variants selectable for a given NPC. Used by the UI.
+   595→     *
+   596→     * - `[]`                  : NPC has no variants registered (the
+   597→     *                          NPC ID doesn't match any variant entry).
+   598→     *                          Caller should treat as `'legacy377'`
+   599→     *                          (every 377 NPC has legacy).
+   600→     * - `['legacy377']`       : NPC has a legacy twin only (the common
+   601→     *                          case for every NPC not imported).
+   602→     *                          Actually — this is returned when the
+   603→     *                          NPC ID matches a variant entry's
+   604→     *                          osrsNpcId AND that entry has
+   605→     *                          `legacyNpcId === -1` — i.e. brand-new
+   606→     *                          OSRS NPC with only the OSRS side.
+   607→     * - `['osrs']`            : brand-new OSRS NPC (legacyNpcId === -1).
+   608→     * - `['legacy377', 'osrs']`: NPC has both — player's choice applies.
+   609→     *
+   610→     * For an NPC ID that matches NEITHER `legacyNpcId` NOR `osrsNpcId`
+   611→     * of any entry, returns `['legacy377']` (the default — every 377
+   612→     * NPC has legacy, even if it's not in the variants index).
+   613→     */
+   614→    getAvailableVariants(npcId: number): NpcVariant[] {
+   615→        const byLegacy = this.byLegacyNpc.get(npcId);
+   616→        if (byLegacy) {
+   617→            return ['legacy377', 'osrs'];
+   618→        }
+   619→        const byOsrs = this.byOsrsNpc.get(npcId);
+   620→        if (byOsrs) {
+   621→            if (byOsrs.legacyNpcId === -1) {
+   622→                return ['osrs'];
+   623→            }
+   624→            // The caller passed the osrsNpcId of a variant pair that
+   625→            // also has a legacy twin. Return both — the player's
+   626→            // choice applies.
+   627→            return ['legacy377', 'osrs'];
+   628→        }
+   629→        // No variant entry — default to legacy377.
+   630→        return ['legacy377'];
+   631→    }
+   632→
+   633→    /**
+   634→     * Returns metadata for the variant pair containing the given NPC ID,
+   635→     * or null if no variant is registered for this NPC.
+   636→     *
+   637→     * Used by the UI to display the variant picker (debugnames,
+   638→     * import date, link to the dep map).
+   639→     *
+   640→     * @param npcId  legacy 377 NPC ID OR osrs-imported NPC ID.
+   641→     */
+   642→    getVariantMetadata(npcId: number): VariantMetadata | null {
+   643→        const byLegacy = this.byLegacyNpc.get(npcId);
+   644→        if (byLegacy) {
+   645→            return {
+   646→                legacyNpcId: byLegacy.legacyNpcId,
+   647→                osrsNpcId: byLegacy.osrsNpcId,
+   648→                osrsDebugname: byLegacy.osrsDebugname,
+   649→                legacyDebugname: byLegacy.legacyDebugname,
+   650→                source: 'legacy377',
+   651→                importedAt: byLegacy.importedAt,
+   652→                depMapPath: byLegacy.depMapPath
+   653→            };
+   654→        }
+   655→        const byOsrs = this.byOsrsNpc.get(npcId);
+   656→        if (byOsrs) {
+   657→            return {
+   658→                legacyNpcId: byOsrs.legacyNpcId,
+   659→                osrsNpcId: byOsrs.osrsNpcId,
+   660→                osrsDebugname: byOsrs.osrsDebugname,
+   661→                legacyDebugname: byOsrs.legacyDebugname,
+   662→                source: 'osrs',
+   663→                importedAt: byOsrs.importedAt,
+   664→                depMapPath: byOsrs.depMapPath
+   665→            };
+   666→        }
+   667→        return null;
+   668→    }
+   669→
+   670→    /**
+   671→     * Returns ALL registered variant entries. Used by the UI to render
+   672→     * the full variant picker (one row per imported NPC).
+   673→     *
+   674→     * Returns a fresh array (callers may mutate without affecting the
+   675→     * registry's internal state).
+   676→     */
+   677→    getAllVariants(): VariantMetadata[] {
+   678→        return this.entries.map(e => ({
+   679→            legacyNpcId: e.legacyNpcId,
+   680→            osrsNpcId: e.osrsNpcId,
+   681→            osrsDebugname: e.osrsDebugname,
+   682→            legacyDebugname: e.legacyDebugname,
+   683→            source: 'legacy377' as const,
+   684→            importedAt: e.importedAt,
+   685→            depMapPath: e.depMapPath
+   686→        }));
+   687→    }
+   688→
+   689→    // ---- Public: variant registration (called by Task 8 writer) ----
+   690→
+   691→    /**
+   692→     * Register a new variant pair. Called by Task 8's writer (or a
+   693→     * wrapper around it) after a successful OSRS import.
+   694→     *
+   695→     * @param legacyNpcId        the legacy 377 NPC ID this OSRS NPC
+   696→     *                           replaces. Pass -1 for brand-new OSRS
+   697→     *                           NPCs that have no legacy twin (e.g.
+   698→     *                           Tormented Demon).
+   699→     * @param osrsImportedNpcId  the new 377 pack-file ID assigned to
+   700→     *                           the OSRS-imported NPC by Task 8's
+   701→     *                           `ContentFolderWriter`.
+   702→     * @param depsMap            the (updated) deps map produced by
+   703→     *                           Task 8. Used to extract the
+   704→     *                           `osrsDebugname` (from the NPC node's
+   705→     *                           `name` field).
+   706→     * @param depMapPath         optional explicit path to the persisted
+   707→     *                           deps.json. If omitted, defaults to
+   708→     *                           `${Environment.BUILD_SRC_DIR}/deps/<sanitized>.deps.json`
+   709→     *                           (matching Task 8's CLI convention).
+   710→     *
+   711→     * After registering, writes the updated index to
+   712→     * `this.variantsPath` so subsequent engine starts pick it up.
+   713→     */
+   714→    registerVariant(
+   715→        legacyNpcId: number,
+   716→        osrsImportedNpcId: number,
+   717→        depsMap: DepsMap,
+   718→        depMapPath?: string
+   719→    ): void {
+   720→        // Extract osrsDebugname from the dep map's NPC node.
+   721→        const npcNode = depsMap.nodes[nodeKey('npc' as NodeKind, depsMap.root.id)];
+   722→        const osrsDebugname: string = (npcNode?.name as string | null) ?? `osrs_npc_${osrsImportedNpcId}`;
+   723→
+   724→        // Extract legacyDebugname from NpcType (if legacyNpcId !== -1).
+   725→        let legacyDebugname: string | null = null;
+   726→        if (legacyNpcId !== -1) {
+   727→            const legacyNpc = NpcType.get(legacyNpcId);
+   728→            legacyDebugname = legacyNpc?.debugname ?? null;
+   729→        }
+   730→
+   731→        // Resolve depMapPath.
+   732→        const resolvedDepMapPath: string = depMapPath ?? this.defaultDepMapPath(osrsDebugname);
+   733→
+   734→        const entry: VariantEntry = {
+   735→            legacyNpcId,
+   736→            osrsNpcId: osrsImportedNpcId,
+   737→            osrsDebugname,
+   738→            legacyDebugname,
+   739→            depMapPath: resolvedDepMapPath,
+   740→            importedAt: new Date().toISOString()
+   741→        };
+   742→
+   743→        this.addEntryInternal(entry);
+   744→        this.writeToDisk();
+   745→
+   746→        // Invalidate any cached dep map for this path (it might have
+   747→        // changed). The next `loadDepMap` call will re-read.
+   748→        const absPath = this.resolveDepMapPath(resolvedDepMapPath);
+   749→        this.depMapCache.delete(absPath);
+   750→
+   751→        printInfo(`VariantRegistry: registered variant (legacy=${legacyNpcId}, osrs=${osrsImportedNpcId}, debugname='${osrsDebugname}')`);
+   752→    }
+   753→
+   754→    /**
+   755→     * Internal: write the current `entries` list to `this.variantsPath`.
+   756→     * Creates the parent directory if needed. Logs a warning on failure
+   757→     * but doesn't throw (the in-memory index is still updated).
+   758→     */
+   759→    private writeToDisk(): void {
+   760→        const file: VariantsFile = {
+   761→            version: VARIANTS_SCHEMA_VERSION,
+   762→            variants: this.entries.map(e => ({ ...e }))
+   763→        };
+   764→        try {
+   765→            const dir = path.dirname(this.variantsPath);
+   766→            if (!fs.existsSync(dir)) {
+   767→                fs.mkdirSync(dir, { recursive: true });
+   768→            }
+   769→            fs.writeFileSync(this.variantsPath, JSON.stringify(file, null, 2) + '\n', 'utf8');
+   770→        } catch (err) {
+   771→            printWarning(`VariantRegistry: failed to write ${this.variantsPath}: ${(err as Error).message}`);
+   772→        }
+   773→    }
+   774→
+   775→    /**
+   776→     * Internal: default dep map path for a given osrsDebugname.
+   777→     * Matches Task 8's CLI convention: `content/deps/<name>.deps.json`.
+   778→     *
+   779→     * Returns a relative path (relative to the engine's CWD) — the
+   780→     * variants.json example uses relative paths, and the registry
+   781→     * resolves them to absolute paths at load time via
+   782→     * `resolveDepMapPath`.
+   783→     */
+   784→    private defaultDepMapPath(osrsDebugname: string): string {
+   785→        // Use a content-relative path so the variants.json file is
+   786→        // portable across machines (no absolute paths baked in).
+   787→        const contentDir = path.basename(Environment.BUILD_SRC_DIR);
+   788→        return `${contentDir}/deps/${osrsDebugname}.deps.json`;
+   789→    }
+   790→
+   791→    /**
+   792→     * Internal: resolve a relative depMapPath to an absolute path.
+   793→     * Relative paths are resolved against the engine's CWD (which is
+   794→     * typically the `engine/` dir). Absolute paths are used as-is.
+   795→     */
+   796→    private resolveDepMapPath(depMapPath: string): string {
+   797→        if (path.isAbsolute(depMapPath)) {
+   798→            return depMapPath;
+   799→        }
+   800→        return path.resolve(process.cwd(), depMapPath);
+   801→    }
+   802→
+   803→    /**
+   804→     * Internal: load a dep map from disk, with caching. Returns null
+   805→     * if the file is missing or unparseable (don't retry).
+   806→     */
+   807→    private loadDepMap(depMapPath: string): DepsMap | null {
+   808→        const absPath = this.resolveDepMapPath(depMapPath);
+   809→        const cached = this.depMapCache.get(absPath);
+   810→        if (cached !== undefined) {
+   811→            return cached;
+   812→        }
+   813→        if (!fs.existsSync(absPath)) {
+   814→            printWarning(`VariantRegistry: dep map not found at ${absPath}`);
+   815→            this.depMapCache.set(absPath, null);
+   816→            return null;
+   817→        }
+   818→        try {
+   819→            const raw = fs.readFileSync(absPath, 'utf8');
+   820→            const parsed = JSON.parse(raw) as DepsMap;
+   821→            this.depMapCache.set(absPath, parsed);
+   822→            return parsed;
+   823→        } catch (err) {
+   824→            printWarning(`VariantRegistry: failed to load dep map ${absPath}: ${(err as Error).message}`);
+   825→            this.depMapCache.set(absPath, null);
+   826→            return null;
+   827→        }
+   828→    }
+   829→
+   830→    /**
+   831→     * Internal: lazily build the `legacyModelOwner` reverse index by
+   832→     * walking `NpcType.configs[]`. Built on first call to
+   833→     * `resolveModelVariant`. Re-built on every call to
+   834→     * `getLegacyModelOwner()` only if `legacyModelOwner` is null —
+   835→     * subsequent calls reuse the cached index.
+   836→     *
+   837→     * The index is NOT invalidated when `NpcType.configs[]` changes
+   838→     * (e.g. after a cache rebuild). For now, that's fine — the engine
+   839→     * rebuilds the cache at startup, before any player logs in. If
+   840→     * this assumption changes, add a `invalidateLegacyModelOwner()`
+   841→     * method and call it after rebuilds.
+   842→     */
+   843→    private getLegacyModelOwner(): Map<number, number> {
+   844→        if (this.legacyModelOwner) {
+   845→            return this.legacyModelOwner;
+   846→        }
+   847→        const index = new Map<number, number>();
+   848→        const configs = NpcType.configs;
+   849→        for (let npcId = 0; npcId < configs.length; npcId++) {
+   850→            const npc = configs[npcId];
+   851→            if (!npc || !npc.models) {
+   852→                continue;
+   853→            }
+   854→            for (let i = 0; i < npc.models.length; i++) {
+   855→                const modelId = npc.models[i];
+   856→                // First-write-wins: if multiple NPCs reference the same
+   857→                // model, the lowest-ID NPC owns it.
+   858→                if (!index.has(modelId)) {
+   859→                    index.set(modelId, npcId);
+   860→                }
+   861→            }
+   862→        }
+   863→        this.legacyModelOwner = index;
+   864→        return index;
+   865→    }
+   866→
+   867→    // ---- Public: test helpers ----
+   868→
+   869→    /**
+   870→     * Test-only: reset the singleton to a fresh state. Used by
+   871→     * `SelfTestVariant.ts` to isolate tests. NOT exposed via the
+   872→     * barrel — tests must import the class directly.
+   873→     */
+   874→    static resetForTest(): void {
+   875→        VariantRegistry.instance = null;
+   876→    }
+   877→
+   878→    /**
+   879→     * Test-only: directly add a variant entry without touching disk.
+   880→     * Used by `SelfTestVariant.ts` to set up test fixtures without
+   881→     * needing a real variants.json file.
+   882→     */
+   883→    _addEntryForTest(entry: {
+   884→        legacyNpcId: number;
+   885→        osrsNpcId: number;
+   886→        osrsDebugname: string;
+   887→        legacyDebugname?: string | null;
+   888→        depMapPath?: string;
+   889→        importedAt?: string;
+   890→    }): void {
+   891→        this.addEntryInternal({
+   892→            legacyNpcId: entry.legacyNpcId,
+   893→            osrsNpcId: entry.osrsNpcId,
+   894→            osrsDebugname: entry.osrsDebugname,
+   895→            legacyDebugname: entry.legacyDebugname ?? null,
+   896→            depMapPath: entry.depMapPath ?? '',
+   897→            importedAt: entry.importedAt ?? new Date().toISOString()
+   898→        });
+   899→    }
+   900→}
+   901→

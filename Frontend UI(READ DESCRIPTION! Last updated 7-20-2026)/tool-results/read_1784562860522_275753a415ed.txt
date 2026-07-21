@@ -1,0 +1,502 @@
+  1200→
+  1201→3. **`readParticle` / `readSound`** return null — OSRS particle systems
+  1202→   and sound formats are complex and undocumented. The dep tracer
+  1203→   records these as missing leaves, which is fine for the pilot.
+  1204→
+  1205→4. **`readAnimBase`** assumes skeletons live in archive 0 (the same
+  1206→   archive as anim frames). This is correct for modern OSRS but may
+  1207→   differ in some cache revisions. If the base isn't found at
+  1208→   archive 0 file `id`, the method returns null.
+  1209→
+  1210→5. **Config bundle child-name resolution** uses the master index's
+  1211→   per-child name hashes. If the master index was written with
+  1212→   `named = false`, falls back to sequential child-ID assignment
+  1213→   based on the standard OSRS child ordering
+  1214→   (`npc.dat`, `npc.idx`, `seq.dat`, `seq.idx`, ...). This is
+  1215→   best-effort and may need adjustment for unusual cache dumps.
+  1216→
+  1217→6. **Master index reading** assumes the master index is stored as a
+  1218→   single compressed container at archive 255, file 0 (read via the
+  1219→   normal sector-walking protocol). The sector's archiveType byte is
+  1220→   NOT validated (only `id` and `part` are), to remain compatible
+  1221→   with both the `archive + 1` convention (used for normal archives)
+  1222→   and the `archiveType = 255` convention (sometimes used for the
+  1223→   master index). This matches OpenRS2's behavior.
+  1224→
+  1225→### Verification
+  1226→
+  1227→- `bun run lint`: 4 baseline errors (all in `src/io/Packet.ts`) + 15
+  1228→  baseline warnings (all pre-existing). Zero errors and zero warnings
+  1229→  in the four new files. No regression.
+  1230→
+  1231→- `bunx tsc --noEmit -p tsconfig.json`: zero TypeScript errors in the
+  1232→  new files. (Pre-existing errors in `OsrsModel.ts`,
+  1233→  `DependencyTracer.ts`, `SelfTest.ts` remain — all from Tasks 5-a/6,
+  1234→  not introduced by this task.)
+  1235→
+  1236→- `bun tools/osrs/SelfTestCache.ts`: all 29 assertions pass:
+  1237→  - Test 1: OsrsCacheReader against `/nonexistent/path/...` — 7
+  1238→    graceful-failure assertions (constructor doesn't throw; all reads
+  1239→    return null/empty).
+  1240→  - Test 2: OsrsCacheAssetReader against missing dir — 11 graceful-
+  1241→    failure assertions (all `readXxx` methods return null).
+  1242→  - Test 3: LegacyCacheWriter round-trip — 11 assertions (model
+  1243→    write+read bytes match exactly; anim write+read succeeds; config
+  1244→    jagfile write+read succeeds; config jagfile re-write merges
+  1245→    correctly).
+  1246→
+  1247→- `bun tools/osrs/SelfTest.ts`: Task 6 self-test still passes (14
+  1248→  nodes, 0 missing, 0 cycles). No regression.
+  1249→
+  1250→- `bun tools/osrs/Trace.ts --npc=9001 --osrs-cache=/nonexistent`:
+  1251→  emits a clear "cache could not be opened" warning and falls back to
+  1252→  NullCacheReader. Exits 0 with the expected 1-node missing-deps
+  1253→  output.
+  1254→
+  1255→### Next-action hooks for downstream tasks
+  1256→
+  1257→- **Task 8 (content-folder writer):** use `LegacyCacheWriter.writeModel(id,
+  1258→  osrsModel.toLegacy377(), 1)` to emit transformed OSRS models into the
+  1259→  377 cache. Use `LegacyCacheWriter.writeAnim(id, osrsAnimFrame.toLegacy377(),
+  1260→  1)` for anims. Use `LegacyCacheWriter.writeNpcConfig(npcDat, npcIdx)` to
+  1261→  write the re-packed `npc.dat`/`npc.idx` (built by merging existing 377
+  1262→  NPC configs with the transformed OSRS ones via
+  1263→  `OsrsNpcType.toLegacy377NpcConfig()`).
+  1264→
+  1265→- **Task 8 (continued):** when generating `npc.dat`/`npc.idx` bytes for
+  1266→  `writeNpcConfig`, use the existing
+  1267→  `engine/tools/pack/config/NpcConfig.ts:packNpcConfigs()` helper to
+  1268→  compile ini-style configs into the binary `npc.dat`/`npc.idx` format.
+  1269→  Pass the OSRS-transformed NPCs as `ConfigLine[]` entries.
+  1270→
+  1271→- **Task 9 (variant registry):** the registry's `resolveModel()` can
+  1272→  now use `OsrsCacheAssetReader.readModel(id)` to fetch OSRS model
+  1273→  bytes directly from the cache. The result is an `OsrsModel` instance
+  1274→  with all OSRS-only fields populated, ready for `toLegacy377()`.
+  1275→
+  1276→- **Task 10 (pilot: Tormented Demon):** run
+  1277→  `bun tools/osrs/Trace.ts --npc=<td_id> --osrs-cache=./data/osrs-cache`
+  1278→  to produce the pilot deps.json. With Task 7 in place, the tracer
+  1279→  will now actually decode the OSRS NPC config + walk its transitive
+  1280→  deps (models, anims, seqs) instead of recording everything as
+  1281→  missing.
+  1282→
+  1283→- **Future cleanup (Task 8+):** port `OsrsObjType` / `OsrsParamType` /
+  1284→  `OsrsStructType` and swap the corresponding `OsrsCacheAssetReader`
+  1285→  stubs to real decoders. The legacy `ObjType.decode()`'s
+  1286→  `printFatalError`-on-unknown-opcode behavior makes it unsafe to use
+  1287→  on OSRS data — the OSRS-native decoders should be tolerant of new
+  1288→  opcodes (read-and-warn vs. crash).
+  1289→
+  1290→---
+  1291→
+  1292→## Task 8 — Content-folder writer + auto pack-list generator
+  1293→**Agent:** ContentWriter
+  1294→**Status:** done
+  1295→
+  1296→### Files created (all under `engine/tools/osrs/`)
+  1297→- `ImportResult.ts` (~135 lines) — TypeScript types for the import report:
+  1298→  `ImportResult`, `WrittenEntry`, `SkippedEntry`, `FailedEntry`, `PackUpdate`,
+  1299→  plus an `emptyImportResult(npcId, npcName, depsMap)` helper that deep-clones
+  1300→  the input deps map (so the writer never mutates its caller's input).
+  1301→- `NameResolver.ts` (~102 lines) — small side-table helper that maps
+  1302→  `kind:osrsId → { newId, debugname }`. Used by the NPC config emitter to
+  1303→  rewrite raw asset IDs in `OsrsNpcType.toLegacy377NpcConfig()` output to
+  1304→  their newly-assigned debugnames.
+  1305→- `ContentFolderWriter.ts` (~1336 lines incl. extensive JSDoc + the nested
+  1306→  `PackFileLike` helper class) — the main writer. See "Public API" below.
+  1307→- `Import.ts` (~338 lines) — CLI entrypoint. Mirrors `Trace.ts`'s flag
+  1308→  parsing convention; supports `--npc=`, `--osrs-cache=`, `--deps=`,
+  1309→  `--out=`, `--dry-run`, `--name-prefix=`, `--group=`, `--help`.
+  1310→- `SelfTestImport.ts` (~360 lines, dev-only) — idempotency self-test. Run
+  1311→  with `bun tools/osrs/SelfTestImport.ts`. Synthesizes a stub DepsMap +
+  1312→  stub CacheReader (a `Tormented Demon Stub` NPC with one model, one anim,
+  1313→  one anim-base, one seq), runs the writer three times, and asserts 27
+  1314→  invariants across the three runs.
+  1315→
+  1316→### Public API
+  1317→
+  1318→```ts
+  1319→export interface WriterOptions {
+  1320→    dryRun?: boolean;        // default: false
+  1321→    namePrefix?: string;     // default: 'osrs_'
+  1322→    groupFile?: string;      // default: 'osrs_imports'
+  1323→    overwrite?: boolean;     // default: false
+  1324→}
+  1325→
+  1326→export class ContentFolderWriter {
+  1327→    constructor(contentDir: string, assetReader: CacheReader, options?: WriterOptions);
+  1328→
+  1329→    importNpc(npcId: number, depsMap: DepsMap): ImportResult;
+  1330→    importMany(npcIds: number[], depsMap: DepsMap): ImportResult;
+  1331→
+  1332→    // Private helpers (documented for downstream-task visibility):
+  1333→    private writeModel(node: DepNode): WrittenEntry | null;       // → content/models/<group>/<name>.ob2  + model.pack
+  1334→    private writeAnim(node: DepNode): WrittenEntry | null;        // → content/models/<group>/<name>.anim + anim.pack + animset.pack
+  1335→    private writeAnimBase(node: DepNode): WrittenEntry | null;    // → content/models/<group>/<name>.base + base.pack
+  1336→    private writeSeq(node: DepNode): WrittenEntry | null;         // → content/scripts/seq/configs/<group>.seq + seq.pack
+  1337→    private writeNpcConfig(node: DepNode, depsMap: DepsMap): WrittenEntry | null;  // → content/scripts/npc/configs/<group>.npc + npc.pack
+  1338→    private updatePackFile(packType: string, id: number, name: string): void;
+  1339→    private sanitizeName(rawName: string, packType: string): string;
+  1340→    private allocateId(packType: string): number;
+  1341→}
+  1342→```
+  1343→
+  1344→The writer also exposes (via `NameResolver`) a side-table that the NPC
+  1345→config emitter consults when rewriting raw OSRS asset IDs in
+  1346→`OsrsNpcType.toLegacy377NpcConfig()` output to their newly-assigned
+  1347→debugnames. This is the "pack context" that `toLegacy377NpcConfig()`
+  1348→deliberately didn't have (per Task 5-c's next-action hook).
+  1349→
+  1350→### ImportResult shape
+  1351→
+  1352→```ts
+  1353→interface ImportResult {
+  1354→    npcId: number;                 // primary NPC ID (first in batch)
+  1355→    npcName: string;               // primary NPC display name
+  1356→    written: {                     // assets written this run
+  1357→        kind: NodeKind;
+  1358→        osrsId: number | string;
+  1359→        newId: number;
+  1360→        debugname: string;
+  1361→        path: string;              // '<dryrun>' when dryRun=true
+  1362→    }[];
+  1363→    skipped: {                     // assets intentionally skipped (idempotency)
+  1364→        kind: NodeKind;
+  1365→        osrsId: number | string;
+  1366→        reason: string;            // e.g. 'already_imported (newId=42)'
+  1367→    }[];
+  1368→    failed: {                      // assets that errored or were missing
+  1369→        kind: NodeKind;
+  1370→        osrsId: number | string;
+  1371→        error: string;             // e.g. 'cache not available: source asset missing during trace'
+  1372→    }[];
+  1373→    packUpdates: {                 // pack files modified during this import
+  1374→        pack: string;              // e.g. 'model', 'anim', 'animset', 'base', 'seq', 'npc'
+  1375→        added: { id: number; name: string }[];
+  1376→    }[];
+  1377→    depMapUpdated: DepsMap;        // deep clone of input deps map with every
+  1378→                                   // successfully-imported OSRS node's
+  1379→                                   // `transformedFrom` field set to its new
+  1380→                                   // 377 ID. Persist this for idempotency.
+  1381→}
+  1382→```
+  1383→
+  1384→### WriterOptions design
+  1385→
+  1386→- **`dryRun`** (default `false`): when true, the writer walks the deps map,
+  1387→  allocates IDs in memory, and produces an `ImportResult` showing what
+  1388→  WOULD be written — but does NOT touch the filesystem or any pack files.
+  1389→  Every `WrittenEntry.path` is set to the sentinel string `'<dryrun>'`.
+  1390→  Useful for previewing an import before committing it.
+  1391→
+  1392→- **`namePrefix`** (default `'osrs_'`): prepended to every sanitized
+  1393→  debugname. Combined with the sanitized OSRS name/ID to form the final
+  1394→  debugname (e.g. `osrs_tormented_demon`, `osrs_model_45000`).
+  1395→
+  1396→- **`groupFile`** (default `'osrs_imports'`): subfolder under
+  1397→  `content/models/` where binary assets (.ob2, .anim, .base) are written,
+  1398→  AND the basename of the `.npc` / `.seq` config files. Multiple NPCs
+  1399→  imported in one batch share the same group file (their `[debugname]`
+  1400→  blocks are appended to the same `.npc` / `.seq` file).
+  1401→
+  1402→- **`overwrite`** (default `false`): when false (the safe default), the
+  1403→  writer NEVER overwrites existing files or pack entries — collisions
+  1404→  trigger a fresh debugname with a `_2`, `_3` suffix instead. When true,
+  1405→  the writer REPLACES existing `[debugname]` blocks in config files and
+  1406→  overwrites binary files with the same path. NOT recommended for normal
+  1407→  use — intended for re-importing after a sanitization rule change.
+  1408→
+  1409→### Sanitization rules
+  1410→
+  1411→The `sanitizeName(rawName, packType)` helper applies the following
+  1412→transforms in order:
+  1413→
+  1414→1. **Lowercase** the entire string.
+  1415→2. **Replace every char NOT in `[a-z0-9]` with `_`** — spaces, hyphens,
+  1416→   apostrophes, etc. all become underscores.
+  1417→3. **Collapse runs of multiple `_`** into a single `_` (so `"a  b"` →
+  1418→   `"a_b"`, not `"a__b"`).
+  1419→4. **Trim leading/trailing `_`** (so `"_foo_"` → `"foo"`).
+  1420→5. **Prefix** with `namePrefix` (default `osrs_`).
+  1421→6. **Dedupe** against the target pack file AND a session-reserved set
+  1422→   (in-memory, populated by prior `sanitizeName()` calls in the same
+  1423→   writer lifetime). If the candidate name is already taken, append
+  1424→   `_2`, `_3`, `_4`, ... until unique.
+  1425→
+  1426→Examples:
+  1427→- `"Tormented demon"` → `"osrs_tormented_demon"`
+  1428→- `"td_stand"` → `"osrs_td_stand"`
+  1429→- `"model_45000"` → `"osrs_model_45000"`
+  1430→- `"anim_2005"` (after `osrs_anim_2005` already exists in `anim.pack`)
+  1431→  → `"osrs_anim_2005_2"`
+  1432→
+  1433→The session-reserved set is critical for batch imports where two OSRS
+  1434→assets sanitize to the same candidate name in the same run — without
+  1435→it, the second asset would silently overwrite the first's pack entry.
+  1436→
+  1437→### Idempotency approach
+  1438→
+  1439→The writer is idempotent at three layers:
+  1440→
+  1441→1. **Deps-map layer** (primary): every OSRS `DepNode` has a
+  1442→   `transformedFrom` field (set by Task 8 per the schema). On each run,
+  1443→   the writer's `bootstrapResolverFromDepsMap()` walks the input deps
+  1444→   map and pre-populates `NameResolver` from any node with
+  1445→   `transformedFrom !== null` (looking up the debugname from the
+  1446→   corresponding pack file). Then `processNode()` checks the field
+  1447→   directly: if set, the node is recorded as `skipped` with reason
+  1448→   `already_imported (newId=N)` and NOT re-processed.
+  1449→
+  1450→2. **NameResolver layer** (cross-NPC): if two NPCs in the same batch
+  1451→   reference the same OSRS asset (e.g. both use OSRS model 45000), the
+  1452→   first NPC's `processNode()` call registers the asset in
+  1453→   `NameResolver`. When the second NPC's `processNode()` runs for the
+  1454→   same OSRS ID, it finds the existing entry in NameResolver, records
+  1455→   it as `skipped` with reason `shared_with_prior_npc`, and updates the
+  1456→   deps map's `transformedFrom` field to point at the existing new ID.
+  1457→
+  1458→3. **Config-file layer** (defensive): `appendConfigBlock()` scans the
+  1459→   target `.npc` / `.seq` config file for an existing `[<debugname>]`
+  1460→   header before appending. If found and `overwrite=false`, the append
+  1461→   is skipped (with a warning). If found and `overwrite=true`, the
+  1462→   existing block is stripped via `stripConfigBlock()` before the new
+  1463→   block is appended. This protects against the case where a prior run
+  1464→   wrote the config file but failed before persisting the updated
+  1465→   deps.json (so the next run's deps-map layer doesn't know about the
+  1466→   prior import).
+  1467→
+  1468→The CLI (`Import.ts`) persists the updated deps.json (with
+  1469→`transformedFrom` filled in) to `content/deps/<npcName>.deps.json`
+  1470→after every successful non-dry-run import. Subsequent runs pick this
+  1471→file up via `--deps=<path>` (or auto-trace + apply the persisted
+  1472→`transformedFrom` from a prior run via the `--out=` round-trip).
+  1473→
+  1474→### Pack-file ID allocation strategy
+  1475→
+  1476→**Decision: `max(existing IDs) + 1` for every pack type.**
+  1477→
+  1478→The schema supports reserved ranges per pack type (e.g. "models
+  1479→50000-59999 reserved for OSRS imports") but no ranges are reserved
+  1480→today. The `allocateId(packType)` helper loads the pack file, finds
+  1481→the maximum existing ID, and returns `max + 1` (or `0` for an empty
+  1482→pack, matching LostCity's convention where every existing pack starts
+  1483→at ID 0).
+  1484→
+  1485→Rationale:
+  1486→- Simplest strategy that preserves backwards-compat (existing IDs are
+  1487→  never reused or overwritten).
+  1488→- The LostCity content folder doesn't have a "free ID range" convention
+  1489→  — IDs are assigned sequentially as new assets are added.
+  1490→- If a future task adds reserved ranges, `allocateId()` is the single
+  1491→  function to change (per-pack-type strategy can be added without
+  1492→  touching call sites).
+  1493→
+  1494→**Anims are registered in BOTH `anim.pack` AND `animset.pack`** (with
+  1495→the same ID and name). This matches the existing LostCity convention
+  1496→where both packs share the same `id=name` mapping for every anim file:
+  1497→- `anim.pack` (AnimPack) is consulted by `SeqConfig.parseSeqConfig()`
+  1498→  when resolving `frameN=<animname>` refs in `.seq` config files.
+  1499→- `animset.pack` (AnimSetPack) is consulted by
+  1500→  `engine/tools/pack/graphics/pack.ts` when mapping `.anim` files to
+  1501→  archive 2 file IDs during cache packing.
+  1502→
+  1503→Registering in only one would break either the seq config parser or
+  1504→the cache packer. The writer registers in both atomically (within the
+  1505→same `updatePackFile()` call sequence, with both packs sharing the
+  1506→same dirty/save batch).
+  1507→
+  1508→### NPC config line rewriting
+  1509→
+  1510→`OsrsNpcType.toLegacy377NpcConfig()` emits raw integer asset IDs in
+  1511→its output (e.g. `model1=45000`, `readyanim=9200`,
+  1512→`param=osrs_runanim,9102`). The writer's `rewriteNpcConfigLine()`
+  1513→post-processes each line to rewrite those IDs to their newly-assigned
+  1514→debugnames via `NameResolver`:
+  1515→
+  1516→| Line shape                              | Rewrite                                          |
+  1517→|-----------------------------------------|--------------------------------------------------|
+  1518→| `modelN=<id>`                           | `modelN=<modelDebugname>`                        |
+  1519→| `headN=<id>`                            | `headN=<modelDebugname>`                         |
+  1520→| `readyanim=<id>`                        | `readyanim=<seqDebugname>`                       |
+  1521→| `walkanim=<id>[,<id>,<id>,<id>]`        | per-element rewrite to seq debugnames            |
+  1522→| `param=osrs_runanim,<id>`               | `param=osrs_runanim,<seqDebugname>`              |
+  1523→| `param=osrs_runanim_{l,r,b},<id>`       | `param=osrs_runanim_{l,r,b},<seqDebugname>`      |
+  1524→| `param=osrs_crawlanim,<id>`             | `param=osrs_crawlanim,<seqDebugname>`            |
+  1525→| `param=osrs_crawlanim_{l,r,b,b2},<id>`  | `param=osrs_crawlanim_{l,r,b,b2},<seqDebugname>` |
+  1526→| `param=osrs_walkanim_b,<id>`            | `param=osrs_walkanim_b,<seqDebugname>`           |
+  1527→
+  1528→Lines whose OSRS ID can't be resolved via `NameResolver` (e.g. the
+  1529→tracer didn't walk that model) fall back to the `model_<id>` /
+  1530→`seq_<id>` / `anim_<id>` literal form — the LostCity config parser
+  1531→accepts both forms (it tries `getByName(value)` first, falling back to
+  1532→`parseInt(value)` if the name lookup returns -1).
+  1533→
+  1534→The header line (`[<osrs_debugname>]`) is also replaced with
+  1535→`[<sanitized_debugname>]` so the pack entry matches the config block
+  1536→header. (The OSRS emitter uses the OSRS debugname or `npc_<id>` as
+  1537→the header — we override it with our `osrs_<name>` sanitized form.)
+  1538→
+  1539→### Seq config emission
+  1540→
+  1541→`writeSeq()` emits an ini-style `[debugname]` block per seq, mirroring
+  1542→the format of `content/scripts/areas/area_kalphite/configs/kalphite.seq`
+  1543→(existing LostCity convention):
+  1544→
+  1545→```
+  1546→[osrs_td_attack]
+  1547→frame1=osrs_anim_2005
+  1548→delay1=2
+  1549→param=osrs_replayFrameDelay,5
+  1550→
+  1551→```
+  1552→
+  1553→The 377 shared fields (loops, walkmerge, stretches, priority,
+  1554→replaceheldleft, replaceheldright, maxloops, preanim_move,
+  1555→postanim_move, duplicatebehavior) are emitted using the same key names
+  1556→as `SeqConfig.parseSeqConfig()` expects. OSRS-only fields (field12,
+  1557→leftHandItem, rightHandItem, replayFrameDelay) are emitted as
+  1558→`param=osrs_<field>,<value>` entries, matching the convention used by
+  1559→`OsrsNpcType.toLegacy377NpcConfig()` for OSRS-only NPC fields.
+  1560→
+  1561→Frame references (`frameN=<animId>`) and interpolated-frame refs
+  1562→(`iframeN=<animId>`) are rewritten to their newly-assigned debugnames
+  1563→via `NameResolver`, the same way NPC config lines are.
+  1564→
+  1565→### Verification
+  1566→
+  1567→- `bun run lint`: 4 baseline errors (all in `src/io/Packet.ts`) + 15
+  1568→  baseline warnings (all pre-existing). Zero errors and zero warnings
+  1569→  in the five new files. No regression.
+  1570→
+  1571→- `bunx tsc --noEmit -p tsconfig.json`: zero TypeScript errors in the
+  1572→  new files. (Pre-existing errors in `OsrsModel.ts`,
+  1573→  `DependencyTracer.ts`, `SelfTest.ts` remain — all from Tasks 5-a/6,
+  1574→  not introduced by this task.)
+  1575→
+  1576→- `bun tools/osrs/SelfTestImport.ts`: all 27 assertions pass:
+  1577→  - **Run 1 (initial import)**: 5 assets written (model, anim, anim-base,
+  1578→    seq, npc), 6 packs updated (model, anim, animset, base, seq, npc),
+  1579→    every OSRS node has `transformedFrom` set, every binary + config
+  1580→    file exists on disk, NPC config has `[osrs_tormented_demon_stub]`
+  1581→    header with rewritten `model1=osrs_model_45000` and
+  1582→    `readyanim=osrs_td_attack`, seq config has `[osrs_td_attack]` header
+  1583→    with rewritten `frame1=osrs_anim_2005`.
+  1584→  - **Run 2 (idempotency)**: 0 assets written, 5 assets skipped (every
+  1585→    skip reason starts with `already_imported`), 0 failed, `model.pack`
+  1586→    content unchanged byte-for-byte.
+  1587→  - **Run 3 (dry-run)**: 5 entries in `written[]` (every `path` is the
+  1588→    sentinel `'<dryrun>'`), 0 files actually written to disk, 0 pack
+  1589→    files modified.
+  1590→
+  1591→- `bun tools/osrs/Import.ts --npc=9001 --dry-run --osrs-cache=/nonexistent`:
+  1592→  produces a report showing the NPC node as
+  1593→  `failed: cache not available: source asset missing during trace`.
+  1594→  Does NOT crash. Exits 0 with a warning. This proves the writer is
+  1595→  exercisable without a real cache (pre-Task-7-default mode).
+  1596→
+  1597→### What's stubbed / deferred
+  1598→
+  1599→1. **Obj / param / struct / script / texture / particle / sound nodes
+  1600→   are skipped with reason `kind 'X' not yet supported by
+  1601→   ContentFolderWriter`.** The task spec scope was models + anims +
+  1602→   seqs + NPC configs only. When `OsrsObjType` is ported (Task 8+),
+  1603→   swap `CacheReader.readObj` to return the OSRS-native type, then add
+  1604→   a `writeObj()` method that emits an ini-style `.obj` config block.
+  1605→   Same pattern for `OsrsParamType` / `OsrsStructType`.
+  1606→
+  1607→2. **Texture imports are NOT implemented.** OSRS texture refs in NPC
+  1608→   configs (`param=osrs_recol_tex{N}s,<id>`) are passed through
+  1609→   unchanged — the LostCity config parser will accept the raw ID. When
+  1610→   a future task adds a texture importer, the `param=osrs_recol_tex...`
+  1611→   lines should be rewritten to the texture's debugname (similar to the
+  1612→   model/seq rewriting done here).
+  1613→
+  1614→3. **The `npc.dat` / `npc.idx` cache files are NOT written by this
+  1615→   writer.** That's the job of the existing
+  1616→   `engine/tools/pack/config/NpcConfig.ts` packer, which runs at build
+  1617→   time and compiles every `.npc` file in the content folder into
+  1618→   `npc.dat` / `npc.idx`. Task 7's `LegacyCacheWriter.writeNpcConfig()`
+  1619→   handles writing the compiled bytes into archive 0 file 2. This
+  1620→   writer only produces the source `.npc` files that the build-time
+  1621→   packer consumes.
+  1622→
+  1623→4. **No `multinpc[]` recursion in the writer.** The tracer already
+  1624→   walked `multinpc[]` and added each form-swap NPC as a separate
+  1625→   `npc:` node in the deps map. The writer processes every NPC node
+  1626→   it finds, so multi-form NPCs (e.g. Kalphite Queen) are handled
+  1627→   transparently — each form gets its own `[debugname]` block in the
+  1628→   group's `.npc` file.
+  1629→
+  1630→5. **No `LegacyCacheWriter` integration.** The writer only writes to
+  1631→   the content folder + pack files. It does NOT write to the live 377
+  1632→   cache (that's a separate concern — the existing build pipeline
+  1633→   compiles the content folder into the cache via
+  1634→   `engine/tools/pack/Build.ts`). Task 7's `LegacyCacheWriter` is
+  1635→   available for callers that want to write directly to the cache
+  1636→   (e.g. for hot-reload during development), but the standard path is
+  1637→   content-folder → build → cache.
+  1638→
+  1639→6. **Pack-file ID allocation is `max + 1`.** No reserved ranges. If a
+  1640→   future task wants to reserve a range (e.g. "models 50000-59999 for
+  1641→   OSRS imports"), `allocateId()` is the single function to change.
+  1642→
+  1643→### Next-action hooks for downstream tasks
+  1644→
+  1645→- **Task 9 (modular variant registry):** the variant registry's
+  1646→  `resolveModel()` can consult `DepsMap.nodes[\`model:${id}\`].transformedFrom`
+  1647→  to find the 377 twin of an OSRS model. If `transformedFrom` is null,
+  1648→  the OSRS model hasn't been imported yet — the registry can either
+  1649→  trigger an import on-demand or fall back to a placeholder.
+  1650→
+  1651→- **Task 10 (pilot: Tormented Demon):** run
+  1652→  `bun tools/osrs/Trace.ts --npc=<td_id> --osrs-cache=./data/osrs-cache`
+  1653→  to produce the pilot deps.json, then
+  1654→  `bun tools/osrs/Import.ts --npc=<td_id> --osrs-cache=./data/osrs-cache --group=td_pilot`
+  1655→  to write the imported content. Verify the imported `.ob2` / `.anim` /
+  1656→  `.npc` files compile cleanly via `bun run build`.
+  1657→
+  1658→- **Task 11 (Kalphite Queen):** the writer handles multi-form NPCs
+  1659→  automatically (each form is a separate `npc:` node in the deps map).
+  1660→  Verify the form-swap animations are correctly referenced via
+  1661→  `multinpc=` lines in the emitted `.npc` config.
+  1662→
+  1663→- **Future cleanup:** port `OsrsObjType` / `OsrsParamType` /
+  1664→  `OsrsStructType` and add corresponding `writeObj()` / `writeParam()` /
+  1665→  `writeStruct()` methods to the writer. The current skip-with-reason
+  1666→  behavior makes the gap visible in every `ImportResult.skipped[]`.
+  1667→
+  1668→- **Future cleanup (deferred from Task 5-a):** hoist the local
+  1669→  `psmartSigned()` helper from `OsrsModel.ts` / `OsrsAnimFrame.ts` into
+  1670→  `Packet.ts` as `psmartSigned()`. Not blocking — both files have their
+  1671→  own copies and they're identical.
+  1672→
+  1673→---
+  1674→
+  1675→## Task 9 — Modular variant registry (resolveModel + storage)
+  1676→**Agent:** VariantRegistry
+  1677→**Status:** done
+  1678→
+  1679→### Files created
+  1680→All under `engine/src/engine/variant/` and `engine/tools/osrs/`:
+  1681→
+  1682→| File | Lines | Purpose |
+  1683→|------|-------|---------|
+  1684→| `src/engine/variant/PlayerVariantState.ts` | 261 | Per-player state (eraPreset + npcOverrides + regionOverrides). JSON round-trip helpers for DB persistence. |
+  1685→| `src/engine/variant/VariantResolver.ts` | 192 | Pure resolution function — no I/O. Implements the 4-step precedence: per-NPC override → per-region override → era preset → server default. Exports `VariantAvailabilitySource` interface for test stubs. |
+  1686→| `src/engine/variant/VariantRegistry.ts` | 900 | The singleton. `load()` reads `content/deps/variants.json` at startup. `resolveNpcVariant(npcId, playerId)`, `resolveModelVariant(modelId, playerId)`, `resolveNpcConfigForPlayer(npcId, playerId)` (the spawn-site helper), `registerVariant(...)` (called by Task 8 writer), `getAvailableVariants(npcId)`, `getVariantMetadata(npcId)`, `getAllVariants()`. Per-player state cache (warmed on login, cleared on logout). Dep-map cache for `resolveModelVariant`. Legacy `modelId → owningNpcId` reverse index built lazily from `NpcType.configs[]`. Test helpers `resetForTest()` and `_addEntryForTest()`. |
+  1687→| `src/engine/variant/VariantPersistence.ts` | 177 | DB load/save via Kysely (LostCity's existing `#/db/query.js` wrapper). `loadPlayerVariantState`, `savePlayerVariantState` (dialect-aware upsert: sqlite `onConflict` vs mysql `onDuplicateKeyUpdate`), `deletePlayerVariantState`. Never throws — all DB errors are logged and a default state is returned. |
+  1688→| `src/engine/variant/index.ts` | 46 | Barrel re-export. |
+  1689→| `tools/osrs/UpdateVariantsIndex.ts` | 336 | CLI script: scans `content/deps/*.deps.json` and regenerates `content/deps/variants.json`. Run after every Task 8 import. Extracts `osrsNpcId` from the npc node's `transformedFrom` (set by Task 8); looks up `legacyNpcId` via `NpcType.getByName(osrsDebugname)` (strips the `osrs_` prefix); falls back to `-1` (brand-new) on miss. |
+  1690→| `tools/osrs/SelfTestVariant.ts` | 191 | Spec-required self-test. Verifies the 5 scenarios from the task brief + 4 bonus availability/precedence tests + 6 bonus JSON round-trip tests. Run with `bun tools/osrs/SelfTestVariant.ts` — prints `ALL PASS`. |
+  1691→
+  1692→### Files modified
+  1693→- `engine/prisma/singleworld/schema.prisma` — added `PlayerModelPreference` model + `PlayerModelPreference` relation field on `account`.
+  1694→- `engine/prisma/multiworld/schema.prisma` — same changes.
+  1695→- `engine/prisma/singleworld/migrations/20260720151954_add_player_model_preference/migration.sql` — generated by `bunx prisma migrate dev` (applied to sqlite db.sqlite).
+  1696→- `engine/src/db/types.ts` — regenerated by `bunx prisma generate` (kysely types now include `PlayerModelPreference`). One-line fix to convert double-quote import to single-quote (matches LostCity's eslint config).
+  1697→
+  1698→### Resolution precedence (the 4-step rule)
+  1699→Applied top-to-bottom (first hit wins):
+
+[showing lines 1200-1699 of 2175; use offset=1700 with limit to continue reading]

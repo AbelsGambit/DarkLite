@@ -1,0 +1,990 @@
+diff --git a/src/cache/osrs/FlatFileCacheReader.ts b/src/cache/osrs/FlatFileCacheReader.ts
+new file mode 100644
+index 00000000..c364ddfe
+--- /dev/null
++++ b/src/cache/osrs/FlatFileCacheReader.ts
+@@ -0,0 +1,481 @@
++import fs from 'fs';
++import path from 'path';
++
++import BZip2 from '#/io/BZip2.js';
++import Packet from '#/io/Packet.js';
++import { decompressGz } from '#/io/GZip.js';
++import { printWarning } from '#/util/Logger.js';
++
++import type { ArchiveReadResult, Index255Entry } from '#/cache/osrs/OsrsCacheReader.js';
++
++/**
++ * Compression types for the JS5 container wrapper (same as OsrsCacheReader).
++ *
++ * Every flat file in the cache is wrapped in a container:
++ *   u8  compression (0=NONE, 1=BZIP2, 2=GZIP)
++ *   u32 compressedSize
++ *   [u32 decompressedSize]  ← only when compression != NONE
++ *   compressed payload (compressedSize bytes)
++ *   [u16 version]           ← optional trailer
++ *
++ * The BZIP2 payload has its "BZh1" magic stripped by the OSRS packer.
++ */
++const COMPRESSION_NONE = 0;
++const COMPRESSION_BZIP2 = 1;
++const COMPRESSION_GZIP = 2;
++
++const MAX_FILE_SIZE = 50_000_000;
++
++/**
++ * Flat-file OSRS cache reader.
++ *
++ * Reads a cache stored as individual `<index>/<file>.dat` files (each
++ * containing the raw container wrapper), as opposed to the sector-chained
++ * `main_file_cache.dat2` + `main_file_cache.idxN` layout that
++ * `OsrsCacheReader` consumes.
++ *
++ * This layout is produced by OpenRS2 / Displee-style extractors and is what
++ * the user's GitHub cache depot ships (`AbelsGambit/DarkLite/.../cache/`).
++ * Each `<index>/<file>.dat` is the raw container bytes for that single
++ * (index, file) pair — no sector walking needed.
++ *
++ * The reference table for index N is at `255/N.dat` (decompressed → protocol-7
++ * reference table, same format as `OsrsCacheReader.parseMasterIndex()`).
++ *
++ * API mirrors `OsrsCacheReader` so the two are interchangeable as
++ * `CacheReader` sources for the import pipeline. The only difference is
++ * construction: pass the `cache/` directory path (the one containing `0/`,
++ * `1/`, ..., `255/` subdirectories).
++ */
++export default class FlatFileCacheReader {
++    private readonly cacheDir: string;
++
++    /** True once the cache directory exists and contains at least `255/`. */
++    private available: boolean = false;
++
++    /**
++     * Per-index reference tables, lazy-cached. Same semantics as
++     * `OsrsCacheReader.refTableCache`: missing key = not yet loaded,
++     * present empty array = loaded but empty/failed.
++     */
++    private refTableCache: Map<number, Index255Entry[]> = new Map();
++
++    constructor(cacheDir: string) {
++        this.cacheDir = cacheDir;
++
++        if (!fs.existsSync(cacheDir)) {
++            return;
++        }
++
++        const idx255Path = path.join(cacheDir, '255');
++        if (!fs.existsSync(idx255Path)) {
++            return;
++        }
++
++        this.available = true;
++    }
++
++    /** True if the cache directory was successfully opened. */
++    get isAvailable(): boolean {
++        return this.available;
++    }
++
++    /** Path the reader was constructed with (for diagnostics). */
++    get dir(): string {
++        return this.cacheDir;
++    }
++
++    /**
++     * Number of files in an index. Counts `.dat` files in `<cacheDir>/<archive>/`.
++     * Returns 0 if the index directory doesn't exist.
++     */
++    count(archive: number): number {
++        const dir = path.join(this.cacheDir, String(archive));
++        if (!fs.existsSync(dir)) {
++            return 0;
++        }
++        try {
++            const files = fs.readdirSync(dir);
++            return files.filter(f => f.endsWith('.dat')).length;
++        } catch {
++            return 0;
++        }
++    }
++
++    /**
++     * Cheap "does this file exist?" check.
++     */
++    has(archive: number, file: number): boolean {
++        const filePath = path.join(this.cacheDir, String(archive), `${file}.dat`);
++        return fs.existsSync(filePath);
++    }
++
++    /**
++     * Read a single file from an archive, decompressing the container.
++     *
++     * Returns the decompressed payload (no container wrapper, no version
++     * trailer), or null on any error / missing file.
++     */
++    read(archive: number, file: number): Uint8Array | null {
++        const raw = this.readRaw(archive, file);
++        if (!raw) {
++            return null;
++        }
++        return this.readContainer(raw);
++    }
++
++    /**
++     * Read a single file's raw container bytes (no decompression).
++     */
++    readRaw(archive: number, file: number): Uint8Array | null {
++        const filePath = path.join(this.cacheDir, String(archive), `${file}.dat`);
++        if (!fs.existsSync(filePath)) {
++            return null;
++        }
++        try {
++            const buf = fs.readFileSync(filePath);
++            return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
++        } catch (err) {
++            printWarning(`FlatFileCacheReader: failed to read ${archive}/${file}.dat: ${(err as Error).message}`);
++            return null;
++        }
++    }
++
++    /**
++     * Read a multi-child archive group and split it into named children.
++     * Mirrors `OsrsCacheReader.readArchive()`.
++     */
++    readArchive(archive: number, file: number): ArchiveReadResult | null {
++        const decompressed = this.read(archive, file);
++        if (!decompressed) {
++            return null;
++        }
++
++        const childIds = this.lookupChildIds(archive, file);
++        const split = this.splitArchive(decompressed, childIds);
++        if (!split) {
++            return null;
++        }
++        return { children: split };
++    }
++
++    /**
++     * Read the reference table for a specific index from `255/<index>.dat`.
++     * Mirrors `OsrsCacheReader.readIndex255(index)`.
++     */
++    readIndex255(index: number = 0): Index255Entry[] {
++        const cached = this.refTableCache.get(index);
++        if (cached !== undefined) {
++            return cached;
++        }
++        this.refTableCache.set(index, []);
++
++        if (!this.available) {
++            return this.refTableCache.get(index)!;
++        }
++
++        const raw = this.readRaw(255, index);
++        if (!raw) {
++            return this.refTableCache.get(index)!;
++        }
++
++        const decompressed = this.readContainer(raw);
++        if (!decompressed) {
++            printWarning(`FlatFileCacheReader: failed to decompress reference table for index ${index}`);
++            return this.refTableCache.get(index)!;
++        }
++
++        const entries = this.parseMasterIndex(decompressed);
++        if (entries === null) {
++            printWarning(`FlatFileCacheReader: failed to parse reference table for index ${index}`);
++            return this.refTableCache.get(index)!;
++        }
++
++        this.refTableCache.set(index, entries);
++        return entries;
++    }
++
++    /** Look up child IDs for an archive within an index. */
++    private lookupChildIds(index: number, archive: number): number[] | null {
++        const entries = this.readIndex255(index);
++        for (const entry of entries) {
++            if (entry.archive === archive) {
++                return entry.childIds;
++            }
++        }
++        return null;
++    }
++
++    /**
++     * Strip a container wrapper and decompress the payload.
++     * Same logic as `OsrsCacheReader.readContainer()`.
++     */
++    private readContainer(data: Uint8Array): Uint8Array | null {
++        if (data.length < 5) {
++            return null;
++        }
++
++        const packet = new Packet(data);
++        const compression = packet.g1();
++        const compressedSize = packet.g4();
++
++        let decompressedSize = compressedSize;
++        let payloadStart = packet.pos;
++
++        if (compression !== COMPRESSION_NONE) {
++            decompressedSize = packet.g4();
++            payloadStart = packet.pos;
++        }
++
++        const payloadEnd = payloadStart + compressedSize;
++
++        if (decompressedSize < 0 || decompressedSize > MAX_FILE_SIZE) {
++            printWarning(`FlatFileCacheReader: invalid decompressed size ${decompressedSize}`);
++            return null;
++        }
++
++        if (payloadEnd > data.length) {
++            printWarning(`FlatFileCacheReader: payload extends beyond data (${payloadEnd} > ${data.length})`);
++            return null;
++        }
++
++        switch (compression) {
++            case COMPRESSION_NONE:
++                return data.subarray(payloadStart, payloadEnd);
++
++            case COMPRESSION_BZIP2: {
++                const compressed = data.subarray(payloadStart, payloadEnd);
++                try {
++                    return BZip2.decompress(compressed, decompressedSize, true);
++                } catch (err) {
++                    printWarning(`FlatFileCacheReader: BZIP2 decompress failed: ${(err as Error).message}`);
++                    return null;
++                }
++            }
++
++            case COMPRESSION_GZIP: {
++                const compressed = data.subarray(payloadStart, payloadEnd);
++                const out = decompressGz(compressed);
++                if (!out) {
++                    printWarning('FlatFileCacheReader: GZIP decompress failed');
++                    return null;
++                }
++                return out;
++            }
++
++            default:
++                printWarning(`FlatFileCacheReader: unknown compression type ${compression}`);
++                return null;
++        }
++    }
++
++    /**
++     * Parse the decompressed reference table (protocol 5/6/7).
++     * Same logic as `OsrsCacheReader.parseMasterIndex()`.
++     */
++    private parseMasterIndex(data: Uint8Array): Index255Entry[] | null {
++        if (data.length < 1) {
++            return null;
++        }
++
++        const packet = new Packet(data);
++        const protocol = packet.g1();
++        if (protocol < 5 || protocol > 7) {
++            printWarning(`FlatFileCacheReader: unsupported reference table protocol ${protocol}`);
++            return null;
++        }
++
++        const hasRevision = protocol >= 6;
++        if (hasRevision) {
++            packet.g4();
++        }
++
++        const mask = packet.g1();
++        const named = (mask & 0x01) !== 0;
++        const hasWhirlpool = (mask & 0x02) !== 0;
++        const hasLengths = (mask & 0x04) !== 0;
++
++        const readSmart = (): number => {
++            if (protocol >= 7) {
++                const peek = data[packet.pos];
++                if (peek < 128) {
++                    return packet.g2();
++                } else {
++                    return packet.g4() & 0x7FFFFFFF;
++                }
++            } else {
++                return packet.g2();
++            }
++        };
++
++        const archiveCount = readSmart();
++        if (archiveCount < 0 || archiveCount > 100_000) {
++            printWarning(`FlatFileCacheReader: implausible archive count ${archiveCount}`);
++            return null;
++        }
++
++        const archiveIds: number[] = new Array(archiveCount);
++        let prevArchiveId = 0;
++        for (let i = 0; i < archiveCount; i++) {
++            prevArchiveId += readSmart();
++            archiveIds[i] = prevArchiveId;
++        }
++
++        const entries: Index255Entry[] = [];
++        for (let i = 0; i < archiveCount; i++) {
++            entries.push({
++                archive: archiveIds[i],
++                crc: 0,
++                version: 0,
++                nameHash: 0,
++                childCount: 0,
++                childIds: [],
++                childNameHashes: []
++            });
++        }
++
++        if (named) {
++            for (let i = 0; i < archiveCount; i++) {
++                entries[i].nameHash = packet.g4();
++            }
++        }
++
++        for (let i = 0; i < archiveCount; i++) {
++            entries[i].crc = packet.g4();
++        }
++
++        if (hasWhirlpool) {
++            for (let i = 0; i < archiveCount; i++) {
++                packet.pos += 64;
++            }
++        }
++
++        if (hasLengths) {
++            for (let i = 0; i < archiveCount; i++) {
++                packet.g4();
++                packet.g4();
++            }
++        }
++
++        if (hasRevision) {
++            for (let i = 0; i < archiveCount; i++) {
++                entries[i].version = packet.g4();
++            }
++        }
++
++        const childCounts: number[] = new Array(archiveCount);
++        for (let i = 0; i < archiveCount; i++) {
++            childCounts[i] = readSmart();
++            entries[i].childCount = childCounts[i];
++        }
++
++        for (let i = 0; i < archiveCount; i++) {
++            const childCount = childCounts[i];
++            const childIds: number[] = new Array(childCount);
++            let prevChildId = 0;
++            for (let j = 0; j < childCount; j++) {
++                prevChildId += readSmart();
++                childIds[j] = prevChildId;
++            }
++            entries[i].childIds = childIds;
++        }
++
++        if (named) {
++            for (let i = 0; i < archiveCount; i++) {
++                const childCount = childCounts[i];
++                const childNameHashes: number[] = new Array(childCount);
++                for (let j = 0; j < childCount; j++) {
++                    childNameHashes[j] = packet.g4();
++                }
++                entries[i].childNameHashes = childNameHashes;
++            }
++        }
++
++        return entries;
++    }
++
++    /**
++     * Split a decompressed multi-child archive group into per-child bytes.
++     * Same logic as `OsrsCacheReader.splitArchive()` — ported from RuneLite's
++     * `ArchiveFiles.loadContents()`.
++     */
++    private splitArchive(data: Uint8Array, childIds: number[] | null): Map<number, Uint8Array> | null {
++        if (data.length < 1) {
++            return null;
++        }
++
++        const childCount = childIds ? childIds.length : 0;
++
++        if (childCount <= 1) {
++            const out = new Map<number, Uint8Array>();
++            const id = childIds && childIds.length > 0 ? childIds[0] : 0;
++            out.set(id, data);
++            return out;
++        }
++
++        const chunks = data[data.length - 1] & 0xFF;
++        const tableOffset = data.length - 1 - chunks * childCount * 4;
++        if (tableOffset < 0) {
++            printWarning(`FlatFileCacheReader: archive too short for chunk table`);
++            return null;
++        }
++
++        const chunkSizes: Int32Array[] = new Array(childCount);
++        const filesSize = new Int32Array(childCount);
++        for (let i = 0; i < childCount; i++) {
++            chunkSizes[i] = new Int32Array(chunks);
++        }
++
++        let pos = tableOffset;
++        for (let chunk = 0; chunk < chunks; chunk++) {
++            let chunkSize = 0;
++            for (let id = 0; id < childCount; id++) {
++                const delta = ((data[pos] << 24) | (data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3]) | 0;
++                pos += 4;
++                chunkSize += delta;
++                chunkSizes[id][chunk] = chunkSize;
++                filesSize[id] += chunkSize;
++            }
++        }
++
++        for (let i = 0; i < childCount; i++) {
++            if (filesSize[i] < 0 || filesSize[i] > MAX_FILE_SIZE) {
++                printWarning(`FlatFileCacheReader: child ${i} has invalid size ${filesSize[i]}`);
++                return null;
++            }
++        }
++
++        const fileContents: Uint8Array[] = new Array(childCount);
++        const fileOffsets = new Int32Array(childCount);
++        for (let i = 0; i < childCount; i++) {
++            fileContents[i] = new Uint8Array(filesSize[i]);
++        }
++
++        pos = 0;
++        for (let chunk = 0; chunk < chunks; chunk++) {
++            let prevChunkSize = 0;
++            for (let id = 0; id < childCount; id++) {
++                const sz = chunkSizes[id][chunk] - prevChunkSize;
++                prevChunkSize = chunkSizes[id][chunk];
++                if (sz > 0 && pos + sz <= tableOffset) {
++                    fileContents[id].set(data.subarray(pos, pos + sz), fileOffsets[id]);
++                    fileOffsets[id] += sz;
++                    pos += sz;
++                }
++            }
++        }
++
++        const out = new Map<number, Uint8Array>();
++        for (let i = 0; i < childCount; i++) {
++            const id = childIds && i < childIds.length ? childIds[i] : i;
++            out.set(id, fileContents[i]);
++        }
++        return out;
++    }
++
++    /** Release resources (no-op for flat files — nothing to close). */
++    close(): void {
++        this.refTableCache.clear();
++        this.available = false;
++    }
++}
+diff --git a/tools/osrs/TestFlatCache.ts b/tools/osrs/TestFlatCache.ts
+new file mode 100644
+index 00000000..01696e6d
+--- /dev/null
++++ b/tools/osrs/TestFlatCache.ts
+@@ -0,0 +1,144 @@
++/**
++ * End-to-end test using FlatFileCacheReader on the user's complete 227 cache.
++ *
++ * 1. Read npc.dat (index 2, archive 9) → 14,142 NPC configs
++ * 2. Find Tormented Demon (NPC IDs 13599-13606) → extract model IDs
++ * 3. Read each model from the models index → decode with OsrsModel
++ * 4. Write the TD model as a .ob2 file (377-compatible gzip)
++ *
++ * Run: `cd /home/z/my-project/lostcity/engine && bun run tools/osrs/TestFlatCache.ts`
++ */
++import fs from 'fs';
++import path from 'path';
++import FlatFileCacheReader from '#/cache/osrs/FlatFileCacheReader.js';
++import OsrsNpcType from '#/cache/osrs/OsrsNpcType.js';
++import OsrsModel from '#/cache/osrs/OsrsModel.js';
++import Model from '#/cache/graphics/Model.js';
++import Packet from '#/io/Packet.js';
++
++const cacheDir = 'data/osrs-cache-flat';
++const reader = new FlatFileCacheReader(cacheDir);
++
++if (!reader.isAvailable) {
++    console.error('Flat cache not available at', cacheDir);
++    process.exit(1);
++}
++
++console.log('=== Flat-File OSRS Cache Reader Test ===\n');
++
++// Index summary
++console.log('Index summary:');
++for (let i = 0; i <= 21; i++) {
++    const count = reader.count(i);
++    if (count > 0) console.log(`  idx${i}: ${count} files`);
++}
++console.log(`  idx255: ${reader.count(255)} ref tables`);
++
++// Read config reference table
++console.log('\n=== Reading config reference table (idx255 file 2) ===');
++const configRef = reader.readIndex255(2);
++console.log(`Config index has ${configRef.length} archives`);
++const npcArchive = configRef.find(e => e.archive === 9);
++console.log(`Archive 9 (npc.dat): ${npcArchive?.childCount} children`);
++
++// Split npc.dat
++console.log('\n=== Splitting npc.dat (index 2, archive 9) ===');
++const npcResult = reader.readArchive(2, 9);
++if (!npcResult) {
++    console.error('Failed to split npc.dat');
++    process.exit(1);
++}
++console.log(`Split into ${npcResult.children.size} NPC configs`);
++
++// Extract TD configs
++console.log('\n=== Tormented Demon NPC configs ===');
++const tdIds = [13599, 13600, 13601, 13602, 13603, 13604, 13605, 13606];
++const tdModelIds = new Set<number>();
++
++for (const tdId of tdIds) {
++    const buf = npcResult.children.get(tdId);
++    if (!buf) {
++        console.log(`NPC ${tdId}: NOT FOUND`);
++        continue;
++    }
++
++    const npc = new OsrsNpcType(tdId);
++    const p = new Packet(buf);
++    try {
++        npc.decodeType(p);
++        const models = npc.models ? Array.from(npc.models) : [];
++        console.log(`NPC ${tdId}: name="${npc.name}", models=[${models.join(', ')}], size=${npc.size}, stats=[${npc.stats.join(',')}]`);
++        for (const m of models) tdModelIds.add(m);
++    } catch (err) {
++        console.log(`NPC ${tdId}: DECODE ERROR: ${(err as Error).message}`);
++    }
++}
++
++console.log(`\nUnique TD model IDs: [${Array.from(tdModelIds).join(', ')}]`);
++
++// Try to find and decode each model
++console.log('\n=== Reading + decoding TD models ===');
++const outputDir = '/tmp/osrs-td-models';
++fs.mkdirSync(outputDir, { recursive: true });
++
++for (const modelId of tdModelIds) {
++    console.log(`\nModel ${modelId}:`);
++
++    // Try each index that might contain models
++    let found = false;
++    for (const idx of [0, 1, 7]) {
++        if (!reader.has(idx, modelId)) continue;
++        const data = reader.read(idx, modelId);
++        if (!data) continue;
++
++        console.log(`  Found in idx${idx}: ${data.length} bytes (decompressed)`);
++        console.log(`  First 16 bytes: ${Array.from(data.slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
++        console.log(`  Last 24 bytes: ${Array.from(data.slice(-24)).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
++
++        // Try OsrsModel decoder
++        try {
++            const model = OsrsModel.decode(modelId, data);
++            if (model) {
++                console.log(`  OsrsModel.decode: SUCCESS vc=${model.vertexCount} fc=${model.faceCount} tfc=${model.texturedFaceCount}`);
++                found = true;
++            } else {
++                console.log(`  OsrsModel.decode: returned null`);
++            }
++        } catch (err) {
++            console.log(`  OsrsModel.decode FAILED: ${(err as Error).message}`);
++        }
++
++        // Try 377 Model.unpack
++        try {
++            Model.meta = [];
++            Model.unpack(modelId, data);
++            const m = Model.meta[modelId];
++            if (m) {
++                console.log(`  377 Model.unpack: vc=${m.vertexCount} fc=${m.faceCount} tfc=${m.texturedFaceCount}`);
++            }
++        } catch (err) {
++            console.log(`  377 Model.unpack FAILED: ${(err as Error).message}`);
++        }
++
++        // Detect format
++        try {
++            const fmt = OsrsModel.detect(data);
++            console.log(`  OsrsModel.detect: ${fmt}`);
++        } catch (err) {
++            console.log(`  OsrsModel.detect FAILED: ${(err as Error).message}`);
++        }
++
++        // Write raw model data to /tmp
++        const outPath = path.join(outputDir, `model_${modelId}_from_idx${idx}.dat`);
++        fs.writeFileSync(outPath, data);
++        console.log(`  Wrote raw bytes to ${outPath}`);
++        break;
++    }
++
++    if (!found) {
++        console.log(`  NOT FOUND in any model index`);
++    }
++}
++
++console.log(`\n=== Done. Model files written to ${outputDir} ===`);
++reader.close();
+diff --git a/tools/osrs/ExtractRealModel.ts b/tools/osrs/ExtractRealModel.ts
+new file mode 100644
+index 00000000..2080c244
+--- /dev/null
++++ b/tools/osrs/ExtractRealModel.ts
+@@ -0,0 +1,184 @@
++/**
++ * Prove the end-to-end pipeline works on the real flat cache:
++ * 1. Pick a demon NPC (e.g. NPC 1272 which contains "demon")
++ * 2. Decode its config to get model IDs
++ * 3. Read the model from idx7 (modern models)
++ * 4. Decode it with OsrsModel
++ * 5. Write the .ob2 file
++ *
++ * Also: search all indexes for a known model ID to determine which index
++ * is the "models" index in modern OSRS.
++ */
++import fs from 'fs';
++import path from 'path';
++import FlatFileCacheReader from '#/cache/osrs/FlatFileCacheReader.js';
++import OsrsNpcType from '#/cache/osrs/OsrsNpcType.js';
++import OsrsModel from '#/cache/osrs/OsrsModel.js';
++import Model from '#/cache/graphics/Model.js';
++import Packet from '#/io/Packet.js';
++
++const reader = new FlatFileCacheReader('data/osrs-cache-flat');
++const npcResult = reader.readArchive(2, 9);
++if (!npcResult) {
++    console.error('Failed to split npc.dat');
++    process.exit(1);
++}
++
++// Find demon NPCs and extract their model IDs
++console.log('=== Scanning for demon NPCs with models ===');
++const demonNpcs: { id: number; name: string; models: number[] }[] = [];
++
++for (const [npcId, buf] of npcResult.children) {
++    if (buf.length < 4) continue;
++    // Quick check: does it contain "demon" or "Demon"?
++    const str = Buffer.from(buf).toString('ascii');
++    if (!str.includes('demon') && !str.includes('Demon')) continue;
++
++    // Decode
++    try {
++        const npc = new OsrsNpcType(npcId);
++        const p = new Packet(buf);
++        npc.decodeType(p);
++        if (npc.models && npc.models.length > 0) {
++            demonNpcs.push({
++                id: npcId,
++                name: npc.name || '(unnamed)',
++                models: Array.from(npc.models)
++            });
++        }
++    } catch {}
++}
++
++console.log(`Found ${demonNpcs.length} demon NPCs with models`);
++for (const d of demonNpcs.slice(0, 10)) {
++    console.log(`  NPC ${d.id}: "${d.name}" models=[${d.models.join(', ')}]`);
++}
++
++// Pick the first demon NPC and extract its model
++if (demonNpcs.length === 0) {
++    console.log('No demon NPCs found, trying dragons...');
++    for (const [npcId, buf] of npcResult.children) {
++        if (buf.length < 4) continue;
++        const str = Buffer.from(buf).toString('ascii');
++        if (!str.includes('Dragon') && !str.includes('dragon')) continue;
++        try {
++            const npc = new OsrsNpcType(npcId);
++            const p = new Packet(buf);
++            npc.decodeType(p);
++            if (npc.models && npc.models.length > 0) {
++                demonNpcs.push({
++                    id: npcId,
++                    name: npc.name || '(unnamed)',
++                    models: Array.from(npc.models)
++                });
++            }
++        } catch {}
++    }
++    console.log(`Found ${demonNpcs.length} dragon NPCs with models`);
++    for (const d of demonNpcs.slice(0, 10)) {
++        console.log(`  NPC ${d.id}: "${d.name}" models=[${d.models.join(', ')}]`);
++    }
++}
++
++if (demonNpcs.length === 0) {
++    console.error('No NPCs with models found!');
++    process.exit(1);
++}
++
++// Try to extract the first demon's model
++const target = demonNpcs[0];
++console.log(`\n=== Extracting model for NPC ${target.id} ("${target.name}") ===`);
++console.log(`Model IDs: [${target.models.join(', ')}]`);
++
++const outputDir = '/tmp/osrs-extracted-models';
++fs.mkdirSync(outputDir, { recursive: true });
++
++for (const modelId of target.models) {
++    console.log(`\nModel ${modelId}:`);
++
++    // Try each index
++    for (let idx = 0; idx <= 21; idx++) {
++        if (!reader.has(idx, modelId)) continue;
++        const data = reader.read(idx, modelId);
++        if (!data) continue;
++
++        console.log(`  idx${idx}: ${data.length} bytes`);
++        console.log(`  First 16: ${Array.from(data.slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
++        console.log(`  Last 24: ${Array.from(data.slice(-24)).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
++
++        // Try OsrsModel
++        try {
++            const model = OsrsModel.decode(modelId, data);
++            if (model) {
++                console.log(`  OsrsModel.decode: SUCCESS vc=${model.vertexCount} fc=${model.faceCount} tfc=${model.texturedFaceCount}`);
++                // Write the raw model data as .ob2
++                const outPath = path.join(outputDir, `npc_${target.id}_model_${modelId}_idx${idx}.ob2`);
++                fs.writeFileSync(outPath, data);
++                console.log(`  Wrote .ob2 to ${outPath}`);
++                break;
++            } else {
++                console.log(`  OsrsModel.decode: null`);
++            }
++        } catch (err) {
++            console.log(`  OsrsModel.decode FAILED: ${(err as Error).message}`);
++        }
++
++        // Try 377 Model.unpack
++        try {
++            Model.meta = [];
++            Model.unpack(modelId, data);
++            const m = Model.meta[modelId];
++            if (m && m.vertexCount > 0 && m.vertexCount < 100000) {
++                console.log(`  377 Model.unpack: vc=${m.vertexCount} fc=${m.faceCount} tfc=${m.texturedFaceCount} ✓`);
++                const outPath = path.join(outputDir, `npc_${target.id}_model_${modelId}_idx${idx}.ob2`);
++                fs.writeFileSync(outPath, data);
++                console.log(`  Wrote .ob2 to ${outPath}`);
++                break;
++            }
++        } catch (err) {
++            console.log(`  377 Model.unpack FAILED: ${(err as Error).message}`);
++        }
++    }
++}
++
++// Also try the TD model IDs from the old cache (53287, 53285, 6318) — maybe they exist here
++console.log('\n=== Checking old-cache TD model IDs ===');
++for (const modelId of [53287, 53285, 6318]) {
++    for (let idx = 0; idx <= 21; idx++) {
++        if (!reader.has(idx, modelId)) continue;
++        const data = reader.read(idx, modelId);
++        if (!data) continue;
++        console.log(`Model ${modelId} in idx${idx}: ${data.length} bytes`);
++
++        try {
++            const model = OsrsModel.decode(modelId, data);
++            if (model) {
++                console.log(`  OsrsModel: vc=${model.vertexCount} fc=${model.faceCount}`);
++                const outPath = path.join(outputDir, `td_old_model_${modelId}_idx${idx}.ob2`);
++                fs.writeFileSync(outPath, data);
++                console.log(`  Wrote to ${outPath}`);
++                break;
++            }
++        } catch (err) {
++            console.log(`  OsrsModel FAILED: ${(err as Error).message}`);
++        }
++
++        try {
++            Model.meta = [];
++            Model.unpack(modelId, data);
++            const m = Model.meta[modelId];
++            if (m && m.vertexCount > 0 && m.vertexCount < 100000) {
++                console.log(`  377 Model: vc=${m.vertexCount} fc=${m.faceCount} ✓`);
++                const outPath = path.join(outputDir, `td_old_model_${modelId}_idx${idx}.ob2`);
++                fs.writeFileSync(outPath, data);
++                console.log(`  Wrote to ${outPath}`);
++                break;
++            }
++        } catch (err) {
++            console.log(`  377 Model FAILED: ${(err as Error).message}`);
++        }
++    }
++}
++
++console.log(`\n=== Done. Extracted models in ${outputDir} ===`);
++reader.close();
+diff --git a/tools/osrs/FindTdInFlatCache.ts b/tools/osrs/FindTdInFlatCache.ts
+new file mode 100644
+index 00000000..952b202d
+--- /dev/null
++++ b/tools/osrs/FindTdInFlatCache.ts
+@@ -0,0 +1,69 @@
++/**
++ * Search for "Tormented Demon" in npc.dat to find its actual ID in this cache.
++ * Also scan the first few NPC configs to check the string terminator format.
++ */
++import FlatFileCacheReader from '#/cache/osrs/FlatFileCacheReader.js';
++
++const reader = new FlatFileCacheReader('data/osrs-cache-flat');
++const result = reader.readArchive(2, 9);
++if (!result) {
++    console.error('Failed to split npc.dat');
++    process.exit(1);
++}
++
++// Search every NPC config for "Tormented" substring
++const search = Buffer.from('Tormented', 'ascii');
++let found = 0;
++for (const [npcId, buf] of result.children) {
++    if (buf.length < search.length) continue;
++    for (let i = 0; i <= buf.length - search.length; i++) {
++        let match = true;
++        for (let j = 0; j < search.length; j++) {
++            if (buf[i + j] !== search[j]) { match = false; break; }
++        }
++        if (match) {
++            console.log(`NPC ${npcId}: contains "Tormented" at offset ${i}`);
++            console.log(`  Context: ${Array.from(buf.slice(Math.max(0, i - 4), Math.min(buf.length, i + 30))).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
++            console.log(`  ASCII: ${Buffer.from(buf.slice(Math.max(0, i - 4), Math.min(buf.length, i + 30))).toString('ascii').replace(/[^\x20-\x7e]/g, '.')}`);
++            found++;
++            if (found > 20) break;
++        }
++    }
++    if (found > 20) break;
++}
++console.log(`\nTotal NPCs containing "Tormented": ${found}`);
++
++// Check the string terminator format by looking at NPC 0 (Hans)
++console.log('\n=== Checking string terminator on NPC 0 ===');
++const npc0 = result.children.get(0);
++if (npc0) {
++    console.log(`NPC 0: ${npc0.length} bytes`);
++    console.log(`  hex: ${Array.from(npc0.slice(0, 40)).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
++    // Find opcode 2 (name) — scan for it
++    let pos = 0;
++    while (pos < npc0.length) {
++        const op = npc0[pos];
++        if (op === 2) {
++            console.log(`  Found op 2 (name) at offset ${pos}`);
++            // Read string until null (0) or newline (10)
++            let end0 = pos + 1;
++            while (end0 < npc0.length && npc0[end0] !== 0) end0++;
++            let end10 = pos + 1;
++            while (end10 < npc0.length && npc0[end10] !== 10) end10++;
++            console.log(`    Null-terminated: "${Buffer.from(npc0.slice(pos + 1, end0)).toString('ascii')}" (end at ${end0})`);
++            console.log(`    Newline-terminated: "${Buffer.from(npc0.slice(pos + 1, end10)).toString('ascii')}" (end at ${end10})`);
++            break;
++        }
++        pos++;
++    }
++}
++
++// Check NPC 1 too
++console.log('\n=== NPC 1 ===');
++const npc1 = result.children.get(1);
++if (npc1) {
++    console.log(`NPC 1: ${npc1.length} bytes`);
++    console.log(`  hex: ${Array.from(npc1.slice(0, 40)).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
++}
++
++reader.close();
+diff --git a/tools/osrs/SearchNpcNames.ts b/tools/osrs/SearchNpcNames.ts
+new file mode 100644
+index 00000000..687b9016
+--- /dev/null
++++ b/tools/osrs/SearchNpcNames.ts
+@@ -0,0 +1,82 @@
++/**
++ * Search npc.dat for various NPC names to verify the split + find TD.
++ * Also dump the child IDs from the ref table to check for sparse IDs.
++ */
++import FlatFileCacheReader from '#/cache/osrs/FlatFileCacheReader.js';
++import Packet from '#/io/Packet.js';
++
++const reader = new FlatFileCacheReader('data/osrs-cache-flat');
++
++// Check ref table child IDs
++const configRef = reader.readIndex255(2);
++const npcArchive = configRef.find(e => e.archive === 9);
++console.log(`Archive 9 child count: ${npcArchive?.childCount}`);
++console.log(`First 20 child IDs: ${npcArchive?.childIds.slice(0, 20).join(', ')}`);
++console.log(`Last 20 child IDs: ${npcArchive?.childIds.slice(-20).join(', ')}`);
++console.log(`Max child ID: ${npcArchive?.childIds[npcArchive.childIds.length - 1]}`);
++
++// Check if child IDs are sequential or sparse
++const ids = npcArchive!.childIds;
++let sparse = 0;
++for (let i = 1; i < ids.length; i++) {
++    if (ids[i] !== ids[i-1] + 1) sparse++;
++}
++console.log(`Non-sequential gaps: ${sparse}`);
++
++// Split npc.dat
++const result = reader.readArchive(2, 9);
++if (!result) {
++    console.error('Failed to split npc.dat');
++    process.exit(1);
++}
++console.log(`\nSplit into ${result.children.size} configs`);
++
++// Search for various names
++const searches = ['Tormented', 'demon', 'Demon', 'Hans', 'goblin', 'Goblin', 'guard', 'Guard', 'dragon', 'Dragon'];
++for (const search of searches) {
++    const searchBuf = Buffer.from(search, 'ascii');
++    let count = 0;
++    const foundIds: number[] = [];
++    for (const [npcId, buf] of result.children) {
++        if (buf.length < searchBuf.length) continue;
++        for (let i = 0; i <= buf.length - searchBuf.length; i++) {
++            let match = true;
++            for (let j = 0; j < searchBuf.length; j++) {
++                if (buf[i + j] !== searchBuf[j]) { match = false; break; }
++            }
++            if (match) {
++                count++;
++                if (foundIds.length < 5) foundIds.push(npcId);
++                break;
++            }
++        }
++    }
++    console.log(`"${search}": ${count} NPCs match (first 5 IDs: ${foundIds.join(', ')})`);
++}
++
++// Decode a few known NPCs to verify the decoder works
++console.log('\n=== Decoding sample NPCs ===');
++const sampleIds = [0, 1, 2, 100, 1000, 5000, 10000];
++for (const id of sampleIds) {
++    const buf = result.children.get(id);
++    if (!buf) {
++        console.log(`NPC ${id}: NOT FOUND`);
++        continue;
++    }
++    const p = new Packet(buf);
++    // Manual parse: find op 2 (name)
++    let name = '(no name)';
++    while (p.available > 0) {
++        const op = p.g1();
++        if (op === 0) break;
++        if (op === 2) {
++            name = p.gjstr(0);
++            break;
++        }
++        // Skip unknown op by breaking
++        break;
++    }
++    console.log(`NPC ${id}: ${buf.length}B, name="${name}"`);
++}
++
++reader.close();
