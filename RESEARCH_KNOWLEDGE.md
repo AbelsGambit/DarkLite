@@ -266,3 +266,96 @@ npm run build-linux  # Linux AppImage
 - Sprite format: `.sprite` files packed via `tools/pack/sprite/`
 - To change visuals: modify sprite files → rebuild cache → client loads new sprites
 - "Buttons which no longer exist visually" can be filled with 0x00 or 0xFF and locked behind if statements in the Java client
+
+---
+
+## 9. OSRS seq.dat Format (CRITICAL — Fixed)
+
+### Archive Assignment
+- **seq.dat = archive 12** (NOT archive 10 as previously assumed)
+- Archive 12 has 11,938 seq configs (rev 227)
+
+### seq Opcode Set (rev 226+, verified against real cache)
+| Op | Hex | Field | Payload |
+|----|-----|-------|---------|
+| 0 | 00 | terminator | — |
+| 1 | 01 | frame group | g2 count N, N×g2 lengths, N×g2 frameIDs-low, N×g2 frameIDs-high |
+| 2 | 02 | replay offset | g2 |
+| 3 | 03 | interleave-leave | g1 count + g1 array |
+| 4 | 04 | stretches | flag |
+| 5 | 05 | forced priority | g1 |
+| 6 | 06 | left-hand item | g2 |
+| 7 | 07 | right-hand item | g2 |
+| 8 | 08 | max loops | g1 |
+| 9 | 09 | pre-anim move | g1 |
+| 10 | 0A | post-anim move | g1 |
+| 11 | 0B | reply mode | g1 |
+| 12 | 0C | chat frame IDs | g1 count + g2 pairs |
+| 13 | 0D | animMayaID | g4 |
+| 14 | 0E | Maya frame sounds | g2 count + 8-byte entries |
+| 15 | 0F | keyframe range | g2 start + g2 end |
+| 17 | 11 | animMayaMasks | g1 count + g1 array |
+| 18 | 12 | debug name | gjstr(0) |
+| 19 | 13 | cross-world sound | flag |
+
+### Frame ID Format
+`frameID = frameIdsLow[i] + (frameIdsHigh[i] << 16)`
+- High 16 bits = frames archive index
+- Low 16 bits = frame index within that file
+
+### TD Animation Trace (VERIFIED)
+- **TD readyanim (seq 11391)**: 32 frames, IDs start at 269680640+
+- **TD walkanim (seq 11390)**: 32 frames, IDs start at 269352960+
+- Each frame ID → anim file (has base ID in 2-byte trailer)
+
+### Existing Demon Animations (for comparison)
+| Seq | Name | Frames | Frame IDs |
+|-----|------|--------|-----------|
+| 63 | demon_walk | 20 | 79167755+ |
+| 64 | demon_attack | 18 | 79167509+ |
+| 65 | demon_block | 20 | 79167592+ |
+| 66 | demon_ready | 11 | 79167722+ |
+| 67 | demon_death | 37 | 79167561+ |
+
+---
+
+## 10. TD Combat Mechanics (from OSRS Wiki)
+
+### Prayer Switching
+- Every **150 HP lost** (25% of 600 max HP), switches protection prayer
+- Switches to the **last combat style** used by the player
+- Stops attacking for **6 ticks (3.6s)** during the switch
+
+### Fire Shield
+- Reduces non-demonbane/abyssal damage by **20%**
+- Drops after **first attack** AND after each **fire bomb attack**
+- Shield down = bonus damage window (damage formula: X²−16)
+- Drops with animation (flames descend and blow away)
+- Shield remains down until the demon is attacked once
+
+### Fire Bombs
+- Every **60 ticks (36s / 10 attacks)**
+- Binds player in place, disables run
+- Releases **2 fire bombs**: one on player's tile, one 3×3 AoE
+- Player has **2 ticks (1.2s)** to move to a safe tile
+- **40+ damage** if hit
+- Fire bombs still damage even if demon is killed mid-air
+
+### Defencelessness
+- **30 ticks (18s)** after fight start
+- **100% player accuracy** (flames on demon's back extinguished)
+- Lasts until player's **first hit after the fire bomb attack**
+- Encourages damage-boosting gear during this window
+
+### Attack Styles
+- Uses **all 3 combat styles** (melee, ranged, magic)
+- Switches based on player's protection prayer
+- Unlike demonic gorillas, stays on one style for **150 HP** (not 70)
+
+### Implementation Strategy
+These mechanics can be **invented from scratch** rather than extracted from the cache:
+1. **Combat script**: Write a runescript `.rs2` file with the prayer switching logic
+2. **Fire shield**: Implement as a damage reduction modifier + visual particle effect
+3. **Fire bombs**: Implement as AoE projectile + tile markers
+4. **Defencelessness**: Implement as an accuracy modifier timer
+5. **Particle system**: Can be coded from scratch — the fire shield visual is a flame effect
