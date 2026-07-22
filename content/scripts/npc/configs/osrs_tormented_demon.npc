@@ -1,14 +1,12 @@
 [osrs_tormented_demon]
 name=Tormented Demon
-desc=A fearsome demon from the While Guthix Sleeps quest.
-model1=osrs_td_53287
-model2=osrs_td_53285
-model3=osrs_td_6318
+desc=Imported from OSRS cache (NPC 13599)
+model1=osrs_tormented_demon_model_53287
 size=3
+walkanim=osrs_tormented_demon_walkanim
+readyanim=osrs_tormented_demon_readyanim
 resizeh=110
 resizev=110
-walkanim=demon_walk
-readyanim=demon_ready
 op2=Attack
 vislevel=450
 wanderrange=6
@@ -31,7 +29,3 @@ param=death_sound,demon_death
 param=demonbane_vulnerable,yes
 param=death_drop,ashes
 param=slayer_category,^slayer_greaterdemon
-param=td_fire_shield,yes
-param=td_prayer_switch,yes
-param=td_fire_bombs,yes
-param=td_defenceless,yes
