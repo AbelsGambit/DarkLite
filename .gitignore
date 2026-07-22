@@ -29,3 +29,6 @@ Thumbs.db
 # Logs
 *.log
 dev.log
+dashboard/db/custom.db
+dashboard/node_modules/
+dashboard/.next/

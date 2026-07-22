@@ -4,14 +4,11 @@ import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   AlertTriangle,
-  Bug,
   CheckCircle2,
   Cpu,
   GitBranch,
   Keyboard,
   LayoutDashboard,
-  Package,
-  Play,
   Search,
   SlidersHorizontal,
   Workflow,
@@ -27,9 +24,6 @@ import {
 import { OverviewTab } from "@/components/dashboard/overview-tab";
 import { ConfigurationTab } from "@/components/dashboard/configuration-tab";
 import { DependencyGraphTab } from "@/components/dashboard/dependency-graph-tab";
-import { DebugTab } from "@/components/dashboard/debug-tab";
-import { PlayTab } from "@/components/dashboard/play-tab";
-import { ModelsTab } from "@/components/dashboard/models-tab";
 import { PlayerProvider, usePlayerId } from "@/components/dashboard/player-context";
 import { PlayerSwitcher } from "@/components/dashboard/player-switcher";
 import { ThemeProvider } from "@/components/dashboard/theme-context";
@@ -39,13 +33,13 @@ import { OnboardingTour } from "@/components/dashboard/onboarding-tour";
 import { usePipelineStatus, usePlayerList, useVariants } from "@/components/dashboard/hooks";
 import { cn } from "@/lib/utils";
 
-type TabId = "overview" | "configuration" | "deps" | "models" | "debug" | "play";
+type TabId = "overview" | "configuration" | "deps";
 
 const TABS: {
   id: TabId;
   label: string;
   icon: React.ReactNode;
-  accent: "amber" | "emerald" | "rose" | "violet" | "blue" | "cyan";
+  accent: "amber" | "emerald" | "rose";
   underline: string;
   shortcut: string;
 }[] = [
@@ -72,30 +66,6 @@ const TABS: {
     accent: "rose",
     underline: "from-rose-400 to-orange-400",
     shortcut: "3",
-  },
-  {
-    id: "models",
-    label: "Models",
-    icon: <Package className="size-4" />,
-    accent: "cyan",
-    underline: "from-cyan-400 to-blue-400",
-    shortcut: "4",
-  },
-  {
-    id: "debug",
-    label: "Debug",
-    icon: <Bug className="size-4" />,
-    accent: "violet",
-    underline: "from-violet-400 to-purple-400",
-    shortcut: "5",
-  },
-  {
-    id: "play",
-    label: "Play",
-    icon: <Play className="size-4" />,
-    accent: "blue",
-    underline: "from-blue-400 to-cyan-400",
-    shortcut: "6",
   },
 ];
 
@@ -150,15 +120,6 @@ export default function Home() {
       } else if (e.key === "3") {
         e.preventDefault();
         setTab("deps");
-      } else if (e.key === "4") {
-        e.preventDefault();
-        setTab("models");
-      } else if (e.key === "5") {
-        e.preventDefault();
-        setTab("debug");
-      } else if (e.key === "6") {
-        e.preventDefault();
-        setTab("play");
       } else if (e.key === "?") {
         e.preventDefault();
         setShowShortcuts((s) => !s);
@@ -308,9 +269,6 @@ export default function Home() {
               {tab === "overview" && <OverviewTab />}
               {tab === "configuration" && <ConfigurationTab />}
               {tab === "deps" && <DependencyGraphTab />}
-              {tab === "models" && <ModelsTab />}
-              {tab === "debug" && <DebugTab />}
-              {tab === "play" && <PlayTab />}
             </motion.div>
           </AnimatePresence>
         </main>
@@ -340,9 +298,6 @@ export default function Home() {
                 <kbd className="rounded border border-neutral-200 bg-neutral-50 px-1 font-mono text-[10px]">1</kbd>
                 <kbd className="rounded border border-neutral-200 bg-neutral-50 px-1 font-mono text-[10px]">2</kbd>
                 <kbd className="rounded border border-neutral-200 bg-neutral-50 px-1 font-mono text-[10px]">3</kbd>
-                <kbd className="rounded border border-neutral-200 bg-neutral-50 px-1 font-mono text-[10px]">4</kbd>
-                <kbd className="rounded border border-neutral-200 bg-neutral-50 px-1 font-mono text-[10px]">5</kbd>
-                <kbd className="rounded border border-neutral-200 bg-neutral-50 px-1 font-mono text-[10px]">6</kbd>
                 <span className="ml-1 text-neutral-400">switch tabs</span>
               </span>
             </div>
@@ -523,7 +478,7 @@ function CommandPaletteWrapper({
   );
 }
 
-function tabIconColor(accent: "amber" | "emerald" | "rose" | "violet" | "blue" | "cyan"): string {
+function tabIconColor(accent: "amber" | "emerald" | "rose"): string {
   switch (accent) {
     case "amber":
       return "text-amber-600";
@@ -531,11 +486,5 @@ function tabIconColor(accent: "amber" | "emerald" | "rose" | "violet" | "blue" |
       return "text-emerald-600";
     case "rose":
       return "text-rose-600";
-    case "violet":
-      return "text-violet-600";
-    case "blue":
-      return "text-blue-600";
-    case "cyan":
-      return "text-cyan-600";
   }
 }
