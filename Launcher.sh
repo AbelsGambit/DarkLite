@@ -31,11 +31,12 @@ while true; do
     echo "  1. Play (start server + launch client)"
     echo "  2. Start Server only (bun start)"
     echo "  3. Clean Build (wipe cache + restart)"
-    echo "  4. Open Dashboard (web UI for config)"
-    echo "  5. Install Dependencies (first time setup)"
-    echo "  6. Exit"
+    echo "  4. Clean Client Data (.file_store_32)"
+    echo "  5. Open Dashboard (web UI for config)"
+    echo "  6. Install Dependencies (first time setup)"
+    echo "  7. Exit"
     echo "=========================================="
-    read -p "Enter choice (1-6): " choice
+    read -p "Enter choice (1-7): " choice
 
     case $choice in
         1)
@@ -44,7 +45,7 @@ while true; do
             cd "$ROOT/engine" && bun start &
             SERVER_PID=$!
             echo "[2/3] Waiting for server to start..."
-            sleep 8
+            sleep 10
             echo "[3/3] Launching client..."
             cd "$ROOT/client" && ./gradlew run
             kill $SERVER_PID 2>/dev/null
@@ -56,30 +57,37 @@ while true; do
             ;;
         3)
             echo ""
-            echo "[1/3] Cleaning build..."
+            echo "[1/3] Cleaning engine build cache..."
             cd "$ROOT/engine" && npm run clean
-            echo "[2/3] Cleaning .file_store_32..."
+            echo "[2/3] Cleaning client data (.file_store_32)..."
             rm -rf ~/.file_store_32 2>/dev/null
             rm -rf /.file_store_32 2>/dev/null
             echo "[3/3] Starting fresh server..."
             cd "$ROOT/engine" && bun start &
-            sleep 8
+            sleep 10
             echo "Done! Server is running."
             ;;
         4)
             echo ""
+            echo "Cleaning .file_store_32 (client stored data)..."
+            rm -rf ~/.file_store_32 2>/dev/null
+            rm -rf /.file_store_32 2>/dev/null
+            echo "Done! Client data cleaned."
+            ;;
+        5)
+            echo ""
             echo "Starting dashboard..."
             cd "$ROOT/dashboard"
             if [ ! -d "node_modules" ]; then
-                echo "First run: installing dependencies..."
+                echo "First run: installing dashboard dependencies..."
                 bun install
             fi
             bun run dev &
-            sleep 8
-            echo "Opening browser..."
+            sleep 10
+            echo "Opening browser at http://localhost:3000"
             xdg-open http://localhost:3000 2>/dev/null || open http://localhost:3000 2>/dev/null
             ;;
-        5)
+        6)
             echo ""
             echo "[1/2] Installing engine dependencies..."
             cd "$ROOT/engine" && bun install
@@ -87,8 +95,11 @@ while true; do
             cd "$ROOT/dashboard" && bun install
             echo "Done! Dependencies installed."
             ;;
-        6)
+        7)
             exit 0
             ;;
     esac
+    
+    echo ""
+    read -p "Press Enter to continue..."
 done
