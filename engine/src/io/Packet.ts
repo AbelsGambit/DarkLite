@@ -60,7 +60,7 @@ export default class Packet extends DoublyLinkable {
     }
 
     static checkcrc(src: Uint8Array, offset: number, length: number, expected: number = 0): boolean {
-        return true;
+        return Packet.getcrc(src, offset, length) == expected;
     }
 
     // constructor

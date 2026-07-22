@@ -45,6 +45,9 @@ export function DebugTab() {
   const [loading, setLoading] = React.useState(true);
   const [npcInput, setNpcInput] = React.useState("osrs_tormented_demon");
   const [applying, setApplying] = React.useState(false);
+  const [hansNpcId, setHansNpcId] = React.useState("3852");
+  const [adminEnabled, setAdminEnabled] = React.useState(false);
+  const [godMode, setGodMode] = React.useState(false);
 
   const fetchState = React.useCallback(async () => {
     setLoading(true);
@@ -126,6 +129,67 @@ export function DebugTab() {
       });
     } finally {
       setApplying(false);
+    }
+  };
+
+  const handleSetHansNpc = async () => {
+    const npcId = parseInt(hansNpcId);
+    if (isNaN(npcId)) {
+      toast.error("Enter a valid NPC ID number");
+      return;
+    }
+    setApplying(true);
+    try {
+      const res = await fetch("/api/debug-npc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "set_debug_npc", npcId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || "Failed to set NPC");
+      } else {
+        toast.success(`Hans replaced with NPC ${npcId}`, { description: data.message });
+        await fetchState();
+      }
+    } catch (err) {
+      toast.error("Failed", { description: (err as Error).message });
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const handleRestoreHans = async () => {
+    setApplying(true);
+    try {
+      const res = await fetch("/api/debug-npc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "restore" }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || "Failed to restore");
+      } else {
+        toast.success("Hans restored", { description: data.message });
+        await fetchState();
+      }
+    } catch (err) {
+      toast.error("Failed", { description: (err as Error).message });
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const handleToggleAdmin = (enabled: boolean) => {
+    setAdminEnabled(enabled);
+    if (enabled) {
+      toast.success("Admin account enabled", {
+        description: "Login with admin / admin (requires build + restart)",
+      });
+    } else {
+      setGodMode(false);
+      toast.info("Admin account disabled");
     }
   };
 
@@ -360,6 +424,96 @@ bun run dev`}
               </div>
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* Quick Debug Tests */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <Bug className="size-4 text-amber-500" />
+            <CardTitle>Quick Debug Tests</CardTitle>
+          </div>
+          <CardDescription>
+            Fast testing options — spawn any NPC where Hans walks, enable admin mode, and more
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Replace Hans with any NPC ID */}
+          <div className="space-y-2">
+            <Label htmlFor="hans-npc-input" className="text-sm font-medium">
+              Replace Hans with NPC ID
+            </Label>
+            <div className="flex gap-2">
+              <Input
+                id="hans-npc-input"
+                type="number"
+                value={hansNpcId}
+                onChange={(e) => setHansNpcId(e.target.value)}
+                placeholder="Enter NPC ID (e.g. 3852 for TD)"
+                className="font-mono"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleSetHansNpc();
+                }}
+              />
+              <Button
+                onClick={handleSetHansNpc}
+                disabled={applying}
+                className="bg-amber-600 text-white hover:bg-amber-700"
+              >
+                {applying ? <RefreshCw className="size-4 animate-spin" /> : <Save className="size-4" />}
+                Set
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRestoreHans}
+                disabled={applying}
+              >
+                Restore Hans
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Replaces Hans (NPC 0) at Lumbridge castle courtyard with the specified NPC ID.
+              After applying, run <code className="rounded bg-muted px-1">bun run build</code> then launch the game.
+            </p>
+          </div>
+
+          <Separator />
+
+          {/* Admin Account */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <Label className="text-sm font-medium">Enable Debug Admin Account</Label>
+                <p className="text-xs text-muted-foreground">
+                  Creates an admin account: <code className="rounded bg-muted px-1">admin</code> / <code className="rounded bg-muted px-1">admin</code>
+                </p>
+              </div>
+              <Switch
+                checked={adminEnabled}
+                onCheckedChange={handleToggleAdmin}
+                disabled={applying}
+              />
+            </div>
+          </div>
+
+          {/* God Mode */}
+          <div className={`space-y-2 pl-6 ${!adminEnabled ? "opacity-40 pointer-events-none" : ""}`}>
+            <div className="flex items-center justify-between">
+              <div>
+                <Label className="text-sm font-medium">God Mode</Label>
+                <p className="text-xs text-muted-foreground">
+                  Max stats, can&apos;t lose HP or prayer
+                </p>
+              </div>
+              <Switch
+                checked={godMode}
+                onCheckedChange={setGodMode}
+                disabled={!adminEnabled}
+              />
+            </div>
+          </div>
         </CardContent>
       </Card>
 
