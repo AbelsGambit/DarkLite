@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+bun.lock
+
+# Build outputs
+engine/data/pack/
+engine/data/unpack/
+engine/out/
+
+# OSRS caches (downloaded on demand via launcher)
+engine/data/osrs-cache/
+engine/data/osrs-cache-flat/
+
+# Client settings
+.file_store_32/
+
+# Electron build output
+electron/dist/
+electron/node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+dev.log
